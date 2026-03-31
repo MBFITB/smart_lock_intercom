@@ -1,0 +1,8 @@
+<resources>
+    <style name="Theme.SmartLockIntercom" parent="Theme.MaterialComponents.Light.NoActionBar">
+        <item name="colorPrimary">#1976D2</item>
+        <item name="colorPrimaryVariant">#1565C0</item>
+        <item name="colorOnPrimary">#FFFFFF</item>
+        <item name="colorSecondary">#FF6F00</item>
+    </style>
+</resources>

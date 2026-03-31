@@ -1,0 +1,33 @@
+# ===== C Server Build Outputs =====
+intercom_test/build/
+*.exe
+*.o
+*.obj
+*.a
+*.lib
+*.dll
+
+# Test artifacts
+intercom_test/test_out.mp4
+
+# ===== Android Build Outputs =====
+android_client/.gradle/
+android_client/build/
+android_client/app/build/
+android_client/local.properties
+
+# Android Studio / IntelliJ
+android_client/.idea/
+*.iml
+
+# APK / AAB
+*.apk
+*.aab
+*.keystore
+*.jks
+
+# ===== OS Files =====
+Thumbs.db
+.DS_Store
+*.swp
+*~

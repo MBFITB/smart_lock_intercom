@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Smart Lock Intercom — RTP Control</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    background: #1a1a2e;
+    color: #eee;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 20px;
+}
+h1 { margin-bottom: 16px; font-size: 1.4em; }
+.status {
+    padding: 8px 16px;
+    border-radius: 20px;
+    font-size: 0.85em;
+    margin-bottom: 20px;
+}
+.status.idle { background: #333; }
+.status.active { background: #27ae60; }
+.status.error { background: #c0392b; }
+
+.info-box {
+    width: 100%;
+    max-width: 480px;
+    background: #0f0f23;
+    border-radius: 12px;
+    padding: 20px;
+    margin-bottom: 20px;
+}
+.info-box h3 { margin-bottom: 10px; color: #8af; }
+.info-row { display: flex; justify-content: space-between; padding: 4px 0; }
+.info-label { color: #888; }
+.info-value { color: #eee; font-family: monospace; }
+
+.peer-input {
+    width: 100%;
+    max-width: 480px;
+    margin-bottom: 16px;
+}
+.peer-input label { display: block; margin-bottom: 6px; color: #888; }
+.peer-input input {
+    width: 100%;
+    padding: 10px;
+    border: 1px solid #444;
+    border-radius: 8px;
+    background: #0f0f23;
+    color: #eee;
+    font-family: monospace;
+    font-size: 1em;
+}
+
+.controls {
+    display: flex;
+    gap: 16px;
+    margin-bottom: 20px;
+}
+.btn {
+    padding: 12px 28px;
+    border: none;
+    border-radius: 24px;
+    font-size: 1em;
+    cursor: pointer;
+    transition: transform 0.1s;
+}
+.btn:active { transform: scale(0.95); }
+.btn-call { background: #27ae60; color: #fff; }
+.btn-hangup { background: #c0392b; color: #fff; }
+.btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+.hint {
+    width: 100%;
+    max-width: 480px;
+    background: #1e1e3a;
+    border-radius: 8px;
+    padding: 12px;
+    font-size: 0.85em;
+    color: #aaa;
+    margin-bottom: 16px;
+}
+.hint code {
+    background: #333;
+    padding: 2px 6px;
+    border-radius: 4px;
+    color: #8f8;
+    font-size: 0.9em;
+}
+
+.log {
+    width: 100%;
+    max-width: 480px;
+    background: #0f0f23;
+    border-radius: 8px;
+    padding: 12px;
+    font-family: monospace;
+    font-size: 0.8em;
+    max-height: 200px;
+    overflow-y: auto;
+    color: #8f8;
+}
+.log .err { color: #f88; }
+.log .info { color: #8af; }
+</style>
+</head>
+<body>
+
+<h1>Smart Lock Intercom (Pure RTP)</h1>
+<div id="status" class="status idle">Idle</div>
+
+<div id="sessionInfo" class="info-box" style="display:none">
+    <h3>RTP Session</h3>
+    <div class="info-row">
+        <span class="info-label">Local RTP Port</span>
+        <span class="info-value" id="infoPort">—</span>
+    </div>
+    <div class="info-row">
+        <span class="info-label">Peer Address</span>
+        <span class="info-value" id="infoPeer">—</span>
+    </div>
+</div>
+
+<div class="peer-input">
+    <label for="peerAddr">Peer Address (IP:port)</label>
+    <input id="peerAddr" type="text" placeholder="192.168.10.100:5006" value="127.0.0.1:5006">
+</div>
+
+<div class="controls">
+    <button id="btnCall" class="btn btn-call" onclick="startCall()">Start RTP</button>
+    <button id="btnHangup" class="btn btn-hangup" onclick="hangup()" disabled>Stop</button>
+</div>
+
+<div class="hint">
+    <p>Pure RTP mode — video/audio playback via ffplay:</p>
+    <p style="margin-top:8px"><code>ffplay -protocol_whitelist rtp,udp -i stream.sdp</code></p>
+    <p style="margin-top:6px">Or VLC: Media → Open Network Stream → <code>rtp://@:5004</code></p>
+</div>
+
+<div id="log" class="log"></div>
+
+<script>
+const API_BASE = window.location.origin;
+
+function log(msg, cls) {
+    const el = document.getElementById('log');
+    const line = document.createElement('div');
+    line.className = cls || '';
+    line.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
+    el.appendChild(line);
+    el.scrollTop = el.scrollHeight;
+}
+
+function setStatus(text, cls) {
+    const el = document.getElementById('status');
+    el.textContent = text;
+    el.className = 'status ' + cls;
+}
+
+async function startCall() {
+    const peer = document.getElementById('peerAddr').value.trim();
+    if (!peer) {
+        log('Please enter a peer address', 'err');
+        return;
+    }
+
+    try {
+        document.getElementById('btnCall').disabled = true;
+        document.getElementById('btnHangup').disabled = false;
+        log('Starting RTP session → ' + peer, 'info');
+
+        const resp = await fetch(API_BASE + '/api/call', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({peer: peer})
+        });
+
+        if (!resp.ok) throw new Error('Server returned ' + resp.status);
+
+        const data = await resp.json();
+        log('Session created — RTP port: ' + data.rtp_port, 'info');
+
+        document.getElementById('sessionInfo').style.display = '';
+        document.getElementById('infoPort').textContent = data.rtp_port;
+        document.getElementById('infoPeer').textContent = data.peer;
+        setStatus('Active — Sending RTP', 'active');
+
+    } catch (e) {
+        log('Failed: ' + e.message, 'err');
+        setStatus('Error', 'error');
+        document.getElementById('btnCall').disabled = false;
+        document.getElementById('btnHangup').disabled = true;
+    }
+}
+
+async function hangup() {
+    log('Stopping RTP session...', 'info');
+    document.getElementById('btnHangup').disabled = true;
+
+    try {
+        await fetch(API_BASE + '/api/call', {method: 'DELETE'});
+    } catch (e) { /* ignore */ }
+
+    setStatus('Idle', 'idle');
+    document.getElementById('sessionInfo').style.display = 'none';
+    document.getElementById('btnCall').disabled = false;
+}
+
+/* Poll status every 3 seconds */
+setInterval(async () => {
+    try {
+        const resp = await fetch(API_BASE + '/api/status');
+        const data = await resp.json();
+        if (data.active && document.getElementById('btnCall').disabled) {
+            /* Session active — update display */
+        } else if (!data.active && document.getElementById('btnHangup').disabled === false) {
+            /* Session ended externally */
+            setStatus('Idle', 'idle');
+            document.getElementById('sessionInfo').style.display = 'none';
+            document.getElementById('btnCall').disabled = false;
+            document.getElementById('btnHangup').disabled = true;
+        }
+    } catch (e) { /* ignore */ }
+}, 3000);
+</script>
+</body>
+</html>
