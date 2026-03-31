@@ -45,6 +45,7 @@ class MainActivity : AppCompatActivity(), RtspClient.Listener {
             override fun surfaceChanged(holder: SurfaceHolder, fmt: Int, w: Int, h: Int) {}
             override fun surfaceDestroyed(holder: SurfaceHolder) {
                 surfaceReady = false
+                videoDecoder?.stop()
             }
         })
 
@@ -150,17 +151,21 @@ class MainActivity : AppCompatActivity(), RtspClient.Listener {
     }
 
     private fun disconnectAll() {
-        audioCapture?.stop()
+        val capture = audioCapture
+        val client = rtspClient
+        val decoder = videoDecoder
+        val player = audioPlayer
         audioCapture = null
-
-        rtspClient?.disconnect()
         rtspClient = null
-
-        videoDecoder?.stop()
         videoDecoder = null
-
-        audioPlayer?.stop()
         audioPlayer = null
+
+        Thread({
+            capture?.stop()
+            client?.disconnect()
+            decoder?.stop()
+            player?.stop()
+        }, "Disconnect").start()
 
         runOnUiThread {
             binding.connectBtn.text = "连接"

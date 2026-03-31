@@ -114,9 +114,6 @@ static void send_h264_nalu_to_client(struct rtsp_client *cli,
 static void maybe_stop_media(void);
 
 
-static void session_timeout_handler(void *arg);
-
-
 static void session_timeout_handler(void *arg)
 {
 	struct rtsp_client *cli = arg;
@@ -195,6 +192,12 @@ static void maybe_stop_media(void)
 		tmr_cancel(&g_rtsp.tmr_video);
 		tmr_cancel(&g_rtsp.tmr_audio);
 		g_rtsp.video_frame_count = 0;
+
+		if (g_rtsp.camera_opened) {
+			camera_close();
+			g_rtsp.camera_opened = false;
+		}
+
 		re_printf("[RTSP] No playing clients, media stopped\n");
 	}
 }
@@ -725,12 +728,6 @@ static void handle_setup(struct rtsp_client *cli, struct rtsp_req *req)
 		}
 	}
 
-	if (!is_video && !is_audio && !is_backchannel) {
-		rtsp_reply(cli, req->cseq, 404, "Not Found",
-			   NULL, NULL, 0);
-		return;
-	}
-
 	/* Generate session ID on first successful SETUP */
 	if (!cli->session_id[0]) {
 		re_snprintf(cli->session_id, sizeof(cli->session_id),
@@ -836,7 +833,7 @@ static void handle_play(struct rtsp_client *cli, struct rtsp_req *req)
 		for (int i = 0; i < AUDIO_SAMPLES; i++) {
 			double t = (double)i / (double)AUDIO_SRATE;
 			pcm[i] = (int16_t)(16000.0 *
-				  sin(2.0 * 3.14159265 * 400.0 * t));
+				  sin(2.0 * M_PI * 400.0 * t));
 		}
 		for (int i = 0; i < AUDIO_SAMPLES; i++)
 			pcmu[i] = g711_pcm2ulaw(pcm[i]);
@@ -914,9 +911,15 @@ static bool dispatch_rtsp(struct rtsp_client *cli,
 			   NULL, NULL, 0);
 	}
 
-	/* Reset session inactivity timeout on any valid request */
-	tmr_start(&cli->tmr_timeout, 60000,
-		  session_timeout_handler, cli);
+	/* Reset session inactivity timeout on recognized methods */
+	if (strcmp(req.method, "OPTIONS") == 0 ||
+	    strcmp(req.method, "DESCRIBE") == 0 ||
+	    strcmp(req.method, "SETUP") == 0 ||
+	    strcmp(req.method, "PLAY") == 0 ||
+	    strcmp(req.method, "GET_PARAMETER") == 0) {
+		tmr_start(&cli->tmr_timeout, 60000,
+			  session_timeout_handler, cli);
+	}
 
 	return false;
 }
@@ -939,6 +942,13 @@ static void rtsp_recv_handler(struct mbuf *mb, void *arg)
 	/* Append received data */
 	mbuf_set_pos(cli->rbuf, cli->rbuf->end);
 	mbuf_write_mem(cli->rbuf, mbuf_buf(mb), mbuf_get_left(mb));
+
+	/* Reject if buffer exceeds sane limit (16KB) */
+	if (cli->rbuf->end > 16384) {
+		re_printf("[RTSP] Client buffer overflow, closing\n");
+		mem_deref(cli);
+		return;
+	}
 
 	/* Process complete requests / interleaved frames */
 	for (;;) {
@@ -1109,7 +1119,7 @@ static void audio_send_timer(void *arg)
 	for (int i = 0; i < AUDIO_SAMPLES; i++) {
 		double t = (double)(phase + (uint32_t)i) / (double)AUDIO_SRATE;
 		pcm[i] = (int16_t)(16000.0 *
-			  sin(2.0 * 3.14159265 * 400.0 * t));
+			  sin(2.0 * M_PI * 400.0 * t));
 	}
 	phase = (phase + AUDIO_SAMPLES) % AUDIO_SRATE;
 

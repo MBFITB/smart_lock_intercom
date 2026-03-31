@@ -26,6 +26,7 @@ class VideoDecoder {
     private var surface: Surface? = null
     private var running = false
     private var feedThread: Thread? = null
+    private var framePtsUs = 0L
 
     // NAL unit queue: each entry is a complete NAL unit (with start code prefix)
     private val nalQueue = LinkedBlockingQueue<ByteArray>(120)
@@ -181,7 +182,8 @@ class VideoDecoder {
                     val nalWithStartCode = addStartCode(nal)
                     inputBuf.clear()
                     inputBuf.put(nalWithStartCode)
-                    mc.queueInputBuffer(inputIdx, 0, nalWithStartCode.size, 0, 0)
+                    mc.queueInputBuffer(inputIdx, 0, nalWithStartCode.size, framePtsUs, 0)
+                    framePtsUs += 1_000_000L / 15  // ~66ms per frame at 15fps
                 }
             }
 

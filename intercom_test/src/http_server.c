@@ -269,7 +269,13 @@ static void http_req_handler(struct http_conn *conn,
 			serve_file(conn, "index.html");
 		}
 		else if (msg->path.l > 1) {
-			serve_file(conn, msg->path.p + 1);
+			char pathbuf[256];
+			size_t plen = msg->path.l - 1;
+			if (plen >= sizeof(pathbuf))
+				plen = sizeof(pathbuf) - 1;
+			memcpy(pathbuf, msg->path.p + 1, plen);
+			pathbuf[plen] = '\0';
+			serve_file(conn, pathbuf);
 		}
 		else {
 			http_reply(conn, 404, "Not Found",

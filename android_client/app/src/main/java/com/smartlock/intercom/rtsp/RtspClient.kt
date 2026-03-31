@@ -31,6 +31,9 @@ class RtspClient(
         private val CONTENT_LENGTH_RE = Regex("Content-Length:\\s*(\\d+)", RegexOption.IGNORE_CASE)
         private val CONTENT_BASE_RE = Regex("Content-Base:\\s*(\\S+)", RegexOption.IGNORE_CASE)
         private val SESSION_RE = Regex("Session:\\s*([^;\\r\\n]+)")
+        private val CONTROL_RE = Regex("a=control:(\\S+)")
+        private val RTPMAP_RE = Regex("a=rtpmap:\\d+\\s+\\S+/(\\d+)")
+        private val SPROP_RE = Regex("sprop-parameter-sets=([^;\\s]+)")
     }
 
     interface Listener {
@@ -93,6 +96,7 @@ class RtspClient(
     private var backchSeq: Short = 0
     private var backchTimestamp: Long = Random.nextLong(0, 0xFFFFFFFFL)
     private var backchSsrc: Int = Random.nextInt()
+    private var backchFirstPacket: Boolean = true
 
     fun connect() {
         if (state != State.DISCONNECTED) return
@@ -289,7 +293,8 @@ class RtspClient(
 
         // RTP header
         frame[4] = 0x80.toByte()  // V=2, P=0, X=0, CC=0
-        frame[5] = (0x80 or PT_PCMU).toByte()  // M=1, PT=0
+        val markerBit = if (backchFirstPacket) { backchFirstPacket = false; 0x80 } else 0
+        frame[5] = (markerBit or PT_PCMU).toByte()
         frame[6] = ((backchSeq.toInt() shr 8) and 0xFF).toByte()
         frame[7] = (backchSeq.toInt() and 0xFF).toByte()
         frame[8]  = ((backchTimestamp shr 24) and 0xFF).toByte()
@@ -335,6 +340,14 @@ class RtspClient(
         inputStream = null
         outputStream = null
         sessionId = null
+        contentBase = null
+        videoTrack = null
+        audioTrack = null
+        backchannelTrack = null
+        backchSeq = 0
+        backchTimestamp = Random.nextLong(0, 0xFFFFFFFFL)
+        backchSsrc = Random.nextInt()
+        backchFirstPacket = true
         state = State.DISCONNECTED
     }
 
@@ -442,7 +455,7 @@ class RtspClient(
             val mLine = block.lines().first()
 
             // Extract control URL
-            val controlMatch = Regex("a=control:(\\S+)").find(block)
+            val controlMatch = CONTROL_RE.find(block)
             val controlUrl = controlMatch?.groupValues?.get(1) ?: continue
 
             // Extract direction
@@ -457,13 +470,13 @@ class RtspClient(
             val pt = mParts.getOrNull(3)?.toIntOrNull() ?: 0
 
             // Extract clock rate from rtpmap
-            val rtpmapMatch = Regex("a=rtpmap:\\d+\\s+\\S+/(\\d+)").find(block)
+            val rtpmapMatch = RTPMAP_RE.find(block)
             val clockRate = rtpmapMatch?.groupValues?.get(1)?.toIntOrNull() ?: 0
 
             // Extract SPS/PPS for H.264
             var sps: ByteArray? = null
             var pps: ByteArray? = null
-            val spropMatch = Regex("sprop-parameter-sets=([^;\\s]+)").find(block)
+            val spropMatch = SPROP_RE.find(block)
             if (spropMatch != null) {
                 val parts = spropMatch.groupValues[1].split(",")
                 if (parts.size >= 2) {

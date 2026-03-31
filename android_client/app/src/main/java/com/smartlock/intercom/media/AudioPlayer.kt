@@ -77,7 +77,7 @@ class AudioPlayer {
             for (i in 0 until length) {
                 decodeBuffer[i] = ulawDecode(data[offset + i])
             }
-            track.write(decodeBuffer, 0, length)
+            track.write(decodeBuffer, 0, length, AudioTrack.WRITE_NON_BLOCKING)
         } catch (e: IllegalStateException) {
             Log.w(TAG, "AudioTrack released, ignoring frame")
         }
