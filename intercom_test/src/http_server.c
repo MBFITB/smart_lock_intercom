@@ -9,6 +9,10 @@
  *   GET  /api/status  → session status
  */
 #include <string.h>
+#ifdef _WIN32
+#include <winsock2.h>
+#include <windows.h>
+#endif
 #include <re.h>
 #include <rem.h>
 #include "intercom.h"
@@ -17,6 +21,14 @@
 static struct http_sock *g_httpsock;
 static struct intercom_session *g_sess;
 static char g_www_path[256];
+
+/* Doorbell state */
+#define DOORBELL_MIN_INTERVAL_MS  5000  /* rate-limit: 5s between triggers */
+
+static struct {
+	bool     pending;     /* doorbell ring waiting to be picked up */
+	uint64_t timestamp;   /* ring timestamp (ms since epoch) */
+} g_doorbell;
 
 
 /* Content-type lookup */
@@ -236,6 +248,61 @@ static void handle_options(struct http_conn *conn)
 }
 
 
+/* Handle POST /api/doorbell — trigger doorbell ring */
+static void handle_doorbell_trigger(struct http_conn *conn)
+{
+	uint64_t now = tmr_jiffies();
+
+	/* Rate-limit: ignore rapid triggers */
+	if (g_doorbell.timestamp > 0 &&
+	    (now - g_doorbell.timestamp) < DOORBELL_MIN_INTERVAL_MS) {
+		http_reply(conn, 429, "Too Many Requests",
+			   "Content-Type: application/json\r\n"
+			   "Access-Control-Allow-Origin: *\r\n"
+			   "Connection: close\r\n"
+			   "\r\n"
+			   "{\"error\":\"rate limited\"}");
+		return;
+	}
+
+	g_doorbell.timestamp = now;
+	g_doorbell.pending   = true;
+
+	re_printf("[DOORBELL] Ring triggered\n");
+
+	http_reply(conn, 200, "OK",
+		   "Content-Type: application/json\r\n"
+		   "Access-Control-Allow-Origin: *\r\n"
+		   "Connection: close\r\n"
+		   "\r\n"
+		   "{\"status\":\"ok\"}");
+}
+
+
+/* Handle GET /api/doorbell/status — check for pending rings */
+static void handle_doorbell_status(struct http_conn *conn)
+{
+	if (g_doorbell.pending) {
+		g_doorbell.pending = false;  /* consume the event */
+
+		http_reply(conn, 200, "OK",
+			   "Content-Type: application/json\r\n"
+			   "Access-Control-Allow-Origin: *\r\n"
+			   "Connection: close\r\n"
+			   "\r\n"
+			   "{\"ringing\":true}");
+	}
+	else {
+		http_reply(conn, 200, "OK",
+			   "Content-Type: application/json\r\n"
+			   "Access-Control-Allow-Origin: *\r\n"
+			   "Connection: close\r\n"
+			   "\r\n"
+			   "{\"ringing\":false}");
+	}
+}
+
+
 /* Main HTTP request handler */
 static void http_req_handler(struct http_conn *conn,
 			     const struct http_msg *msg, void *arg)
@@ -260,6 +327,15 @@ static void http_req_handler(struct http_conn *conn,
 	else if (0 == pl_strcasecmp(&msg->met, "DELETE") &&
 	         0 == pl_strcmp(&msg->path, "/api/call")) {
 		handle_call_delete(conn, msg);
+	}
+	/* Doorbell API */
+	else if (0 == pl_strcasecmp(&msg->met, "POST") &&
+	         0 == pl_strcmp(&msg->path, "/api/doorbell")) {
+		handle_doorbell_trigger(conn);
+	}
+	else if (0 == pl_strcasecmp(&msg->met, "GET") &&
+	         0 == pl_strcmp(&msg->path, "/api/doorbell/status")) {
+		handle_doorbell_status(conn);
 	}
 	/* Static files */
 	else if (0 == pl_strcasecmp(&msg->met, "GET")) {

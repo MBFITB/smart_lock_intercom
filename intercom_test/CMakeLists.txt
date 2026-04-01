@@ -13,6 +13,7 @@ add_executable(intercom_test
     src/session.c
     src/camera_win.c
     src/audio_out_win.c
+    src/audio_in_win.c
     src/rtsp_server.c
 )
 

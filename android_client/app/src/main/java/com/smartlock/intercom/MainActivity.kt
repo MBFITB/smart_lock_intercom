@@ -3,6 +3,7 @@ package com.smartlock.intercom
 import android.Manifest
 import android.annotation.SuppressLint
 import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Bundle
 import android.util.Log
 import android.view.MotionEvent
@@ -22,7 +23,12 @@ class MainActivity : AppCompatActivity(), RtspClient.Listener {
     companion object {
         private const val TAG = "MainActivity"
         private const val REQ_AUDIO_PERM = 1001
+        private const val REQ_NOTIF_PERM = 1002
         private const val DEFAULT_PORT = 8555
+
+        /** Checked by DoorbellService to avoid showing incoming call while streaming */
+        @Volatile @JvmStatic
+        var isStreaming = false
     }
 
     private lateinit var binding: ActivityMainBinding
@@ -32,6 +38,9 @@ class MainActivity : AppCompatActivity(), RtspClient.Listener {
     private var audioPlayer: AudioPlayer? = null
     private var audioCapture: AudioCapture? = null
     private var surfaceReady = false
+    private var pendingAutoConnect: String? = null
+    @Volatile
+    private var disconnecting = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -41,11 +50,24 @@ class MainActivity : AppCompatActivity(), RtspClient.Listener {
         binding.surfaceView.holder.addCallback(object : SurfaceHolder.Callback {
             override fun surfaceCreated(holder: SurfaceHolder) {
                 surfaceReady = true
+                // Restart video decoder if RTSP is already playing (e.g. back from background)
+                val client = rtspClient
+                if (client != null && client.state == RtspClient.State.PLAYING) {
+                    restartVideoDecoder(holder.surface)
+                }
+                // Handle deferred auto-connect (from incoming call)
+                val host = pendingAutoConnect
+                if (host != null) {
+                    pendingAutoConnect = null
+                    binding.addressInput.setText(host)
+                    onConnectClick()
+                }
             }
             override fun surfaceChanged(holder: SurfaceHolder, fmt: Int, w: Int, h: Int) {}
             override fun surfaceDestroyed(holder: SurfaceHolder) {
                 surfaceReady = false
                 videoDecoder?.stop()
+                videoDecoder = null
             }
         })
 
@@ -58,10 +80,45 @@ class MainActivity : AppCompatActivity(), RtspClient.Listener {
             ActivityCompat.requestPermissions(this,
                 arrayOf(Manifest.permission.RECORD_AUDIO), REQ_AUDIO_PERM)
         }
+
+        // Request notification permission (Android 13+)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS)
+                != PackageManager.PERMISSION_GRANTED) {
+                ActivityCompat.requestPermissions(this,
+                    arrayOf(Manifest.permission.POST_NOTIFICATIONS), REQ_NOTIF_PERM)
+            }
+        }
+
+        // Handle auto-connect from IncomingCallActivity
+        handleAutoConnect(intent)
+    }
+
+    override fun onNewIntent(intent: android.content.Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handleAutoConnect(intent)
+    }
+
+    private fun handleAutoConnect(intent: android.content.Intent?) {
+        val host = intent?.getStringExtra("auto_connect_host") ?: return
+        intent.removeExtra("auto_connect_host")
+
+        if (rtspClient != null) return  // already connected
+
+        if (surfaceReady) {
+            binding.addressInput.setText(host)
+            onConnectClick()
+        } else {
+            // Defer until surfaceCreated callback
+            pendingAutoConnect = host
+        }
     }
 
     override fun onDestroy() {
         super.onDestroy()
+        isStreaming = false
+        DoorbellService.stop(this)
         audioCapture?.stop()
         audioCapture = null
         rtspClient?.disconnect()
@@ -73,6 +130,8 @@ class MainActivity : AppCompatActivity(), RtspClient.Listener {
     }
 
     private fun onConnectClick() {
+        if (disconnecting) return  // wait for previous disconnect to finish
+
         if (rtspClient != null) {
             // Disconnect
             disconnectAll()
@@ -87,9 +146,8 @@ class MainActivity : AppCompatActivity(), RtspClient.Listener {
         val host = parts[0]
         val port = if (parts.size > 1) parts[1].toIntOrNull() ?: DEFAULT_PORT else DEFAULT_PORT
 
-        // Validate host — prevent header injection
-        if (host.isEmpty() || host.contains("\n") || host.contains("\r")
-            || host.contains("/") || host.contains(" ")) {
+        // Validate host — whitelist: alphanumeric, dots, dashes only
+        if (host.isEmpty() || !host.matches(Regex("^[a-zA-Z0-9._-]+$"))) {
             binding.statusText.text = "地址格式无效"
             return
         }
@@ -102,6 +160,9 @@ class MainActivity : AppCompatActivity(), RtspClient.Listener {
         client.listener = this
         rtspClient = client
         audioCapture = AudioCapture(client)
+
+        // Start doorbell monitoring service
+        DoorbellService.start(this, host)
 
         client.connect()
     }
@@ -151,6 +212,10 @@ class MainActivity : AppCompatActivity(), RtspClient.Listener {
     }
 
     private fun disconnectAll() {
+        if (disconnecting) return
+        disconnecting = true
+        isStreaming = false
+
         val capture = audioCapture
         val client = rtspClient
         val decoder = videoDecoder
@@ -160,11 +225,18 @@ class MainActivity : AppCompatActivity(), RtspClient.Listener {
         videoDecoder = null
         audioPlayer = null
 
+        // Detach listener before background disconnect to prevent
+        // stale callbacks from interfering with new connections
+        client?.listener = null
+
+        // Keep DoorbellService running so doorbell can be received while disconnected
+
         Thread({
             capture?.stop()
             client?.disconnect()
             decoder?.stop()
             player?.stop()
+            disconnecting = false
         }, "Disconnect").start()
 
         runOnUiThread {
@@ -201,6 +273,7 @@ class MainActivity : AppCompatActivity(), RtspClient.Listener {
                 RtspClient.State.PLAYING -> {
                     binding.statusText.text = "播放中"
                     binding.talkBtn.isEnabled = true
+                    isStreaming = true
 
                     // Start media decoders now that we know SPS/PPS
                     if (surfaceReady && !isDestroyed) {
@@ -216,12 +289,14 @@ class MainActivity : AppCompatActivity(), RtspClient.Listener {
                     audioPlayer?.start()
                 }
                 RtspClient.State.DISCONNECTED -> {
+                    isStreaming = false
                     binding.statusText.text = "未连接"
                     binding.connectBtn.text = "连接"
                     binding.talkBtn.isEnabled = false
                     binding.addressInput.isEnabled = true
                 }
                 RtspClient.State.ERROR -> {
+                    isStreaming = false
                     binding.statusText.text = "连接错误"
                     binding.connectBtn.text = "连接"
                     binding.talkBtn.isEnabled = false
@@ -237,5 +312,13 @@ class MainActivity : AppCompatActivity(), RtspClient.Listener {
             binding.statusText.text = "错误: $message"
             disconnectAll()
         }
+    }
+
+    private fun restartVideoDecoder(surface: android.view.Surface) {
+        if (!surface.isValid) return
+        videoDecoder?.stop()
+        val decoder = VideoDecoder()
+        videoDecoder = decoder
+        decoder.start(surface, rtspClient?.getSps(), rtspClient?.getPps())
     }
 }

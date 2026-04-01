@@ -13,7 +13,6 @@
  */
 #include <string.h>
 #include <stdio.h>
-#include <math.h>
 #include <winsock2.h>
 #include <windows.h>
 #include <re.h>
@@ -22,6 +21,7 @@
 #include "camera.h"
 #include "rtsp_server.h"
 #include "audio_out.h"
+#include "audio_in.h"
 
 #define PT_PCMU       0
 #define PT_H264       107
@@ -99,6 +99,7 @@ static struct {
 
 	uint16_t port;             /* RTSP listen port */
 	char local_ip[64];         /* our IP for SDP */
+	bool mic_opened;           /* audio input device open */
 } g_rtsp;
 
 
@@ -172,6 +173,19 @@ static void ensure_media_started(void)
 		g_rtsp.camera_opened = true;
 	}
 
+	/* Start microphone capture */
+	if (!g_rtsp.mic_opened) {
+		int err = audio_in_open(AUDIO_SRATE, 1, AUDIO_SAMPLES);
+		if (err) {
+			re_fprintf(stderr,
+				   "[RTSP] audio_in_open: %d (using silence)\n",
+				   err);
+		} else {
+			g_rtsp.mic_opened = true;
+			re_printf("[RTSP] Microphone capture started\n");
+		}
+	}
+
 	/*
 	 * Always (re)start timers unconditionally.
 	 *
@@ -192,12 +206,6 @@ static void maybe_stop_media(void)
 		tmr_cancel(&g_rtsp.tmr_video);
 		tmr_cancel(&g_rtsp.tmr_audio);
 		g_rtsp.video_frame_count = 0;
-
-		if (g_rtsp.camera_opened) {
-			camera_close();
-			g_rtsp.camera_opened = false;
-		}
-
 		re_printf("[RTSP] No playing clients, media stopped\n");
 	}
 }
@@ -830,11 +838,13 @@ static void handle_play(struct rtsp_client *cli, struct rtsp_req *req)
 		int16_t pcm[AUDIO_SAMPLES];
 		uint8_t pcmu[AUDIO_SAMPLES];
 
-		for (int i = 0; i < AUDIO_SAMPLES; i++) {
-			double t = (double)i / (double)AUDIO_SRATE;
-			pcm[i] = (int16_t)(16000.0 *
-				  sin(2.0 * M_PI * 400.0 * t));
-		}
+		/* Read mic if available, else silence */
+		int nread = 0;
+		if (g_rtsp.mic_opened)
+			nread = audio_in_read(pcm, AUDIO_SAMPLES);
+		if (nread < AUDIO_SAMPLES)
+			memset(&pcm[nread], 0,
+			       (size_t)(AUDIO_SAMPLES - nread) * sizeof(int16_t));
 		for (int i = 0; i < AUDIO_SAMPLES; i++)
 			pcmu[i] = g711_pcm2ulaw(pcm[i]);
 
@@ -1105,7 +1115,6 @@ static void audio_send_timer(void *arg)
 	struct le *le;
 	uint8_t pcmu[AUDIO_SAMPLES];
 	int16_t pcm[AUDIO_SAMPLES];
-	static uint32_t phase = 0;
 
 	(void)arg;
 
@@ -1115,13 +1124,31 @@ static void audio_send_timer(void *arg)
 	if (!has_playing_clients())
 		return;
 
-	/* Generate 400 Hz test tone */
-	for (int i = 0; i < AUDIO_SAMPLES; i++) {
-		double t = (double)(phase + (uint32_t)i) / (double)AUDIO_SRATE;
-		pcm[i] = (int16_t)(16000.0 *
-			  sin(2.0 * M_PI * 400.0 * t));
+	/* Drain excess ring buffer to prevent accumulating latency.
+	 * Keep at most 1 frame ahead — discard older data. */
+	if (g_rtsp.mic_opened) {
+		int avail = audio_in_available();
+		if (avail > AUDIO_SAMPLES * 2) {
+			int16_t discard[AUDIO_SAMPLES];
+			int skip = avail - AUDIO_SAMPLES;
+			while (skip > 0) {
+				int n = audio_in_read(discard,
+						     skip > AUDIO_SAMPLES
+						     ? AUDIO_SAMPLES : skip);
+				if (n == 0) break;
+				skip -= n;
+			}
+		}
 	}
-	phase = (phase + AUDIO_SAMPLES) % AUDIO_SRATE;
+
+	/* Read from microphone, fall back to silence */
+	int nread = 0;
+	if (g_rtsp.mic_opened)
+		nread = audio_in_read(pcm, AUDIO_SAMPLES);
+
+	if (nread < AUDIO_SAMPLES)
+		memset(&pcm[nread], 0,
+		       (size_t)(AUDIO_SAMPLES - nread) * sizeof(int16_t));
 
 	/* PCM → G.711 µ-law */
 	for (int i = 0; i < AUDIO_SAMPLES; i++)
@@ -1371,6 +1398,11 @@ void rtsp_server_close(void)
 	if (g_rtsp.camera_opened) {
 		camera_close();
 		g_rtsp.camera_opened = false;
+	}
+
+	if (g_rtsp.mic_opened) {
+		audio_in_close();
+		g_rtsp.mic_opened = false;
 	}
 
 	timeEndPeriod(1);

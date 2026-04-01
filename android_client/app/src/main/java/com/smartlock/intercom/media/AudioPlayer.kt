@@ -26,8 +26,8 @@ class AudioPlayer {
             AudioFormat.CHANNEL_OUT_MONO,
             AudioFormat.ENCODING_PCM_16BIT
         )
-        // Use at least 4 frames worth of buffer (40ms × 4 = 160ms)
-        val bufSize = maxOf(minBuf, SAMPLE_RATE * 2 * 160 / 1000)
+        // Use at least 2 frames worth of buffer (40ms × 2 = 80ms)
+        val bufSize = maxOf(minBuf, SAMPLE_RATE * 2 * 80 / 1000)
 
         val track = try {
             AudioTrack.Builder()
@@ -46,6 +46,7 @@ class AudioPlayer {
                 )
                 .setBufferSizeInBytes(bufSize)
                 .setTransferMode(AudioTrack.MODE_STREAM)
+                .setPerformanceMode(AudioTrack.PERFORMANCE_MODE_LOW_LATENCY)
                 .build()
         } catch (e: Exception) {
             Log.e(TAG, "Failed to create AudioTrack", e)
