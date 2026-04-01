@@ -18,4 +18,7 @@
 int rtsp_server_init(const struct sa *laddr);
 void rtsp_server_close(void);
 
+/* Accept a relay-bridged TCP connection */
+void rtsp_accept_relay_conn(void *tc, void *arg);
+
 #endif /* RTSP_SERVER_H */

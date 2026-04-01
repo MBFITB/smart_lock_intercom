@@ -16,6 +16,8 @@
 #include <re.h>
 #include <rem.h>
 #include "intercom.h"
+#include "stun_client.h"
+#include "relay_client.h"
 
 
 static struct http_sock *g_httpsock;
@@ -58,6 +60,7 @@ static int serve_file(struct http_conn *conn, const char *filename)
 
 	/* Prevent path traversal */
 	if (strstr(filename, "..") || strstr(filename, "\\") ||
+	    filename[0] == '/' || filename[0] == '\\' ||
 	    strchr(filename, '\0') != filename + strlen(filename)) {
 		http_ereply(conn, 403, "Forbidden");
 		return EPERM;
@@ -303,6 +306,35 @@ static void handle_doorbell_status(struct http_conn *conn)
 }
 
 
+/* Handle GET /api/nat — return NAT traversal info */
+static void handle_nat_info(struct http_conn *conn)
+{
+	char body[512];
+	const char *public_addr = stun_get_public_addr();
+	const char *relay_srv = relay_client_get_server();
+	bool relay_ok = relay_client_is_connected();
+
+	re_snprintf(body, sizeof(body),
+		    "{\"public_addr\":%s%s%s,"
+		    "\"relay_server\":%s%s%s,"
+		    "\"relay_connected\":%s}",
+		    public_addr ? "\"" : "",
+		    public_addr ? public_addr : "null",
+		    public_addr ? "\"" : "",
+		    relay_srv ? "\"" : "",
+		    relay_srv ? relay_srv : "null",
+		    relay_srv ? "\"" : "",
+		    relay_ok ? "true" : "false");
+
+	http_reply(conn, 200, "OK",
+		   "Content-Type: application/json\r\n"
+		   "Access-Control-Allow-Origin: *\r\n"
+		   "Connection: close\r\n"
+		   "\r\n"
+		   "%s", body);
+}
+
+
 /* Main HTTP request handler */
 static void http_req_handler(struct http_conn *conn,
 			     const struct http_msg *msg, void *arg)
@@ -336,6 +368,11 @@ static void http_req_handler(struct http_conn *conn,
 	else if (0 == pl_strcasecmp(&msg->met, "GET") &&
 	         0 == pl_strcmp(&msg->path, "/api/doorbell/status")) {
 		handle_doorbell_status(conn);
+	}
+	/* NAT traversal info */
+	else if (0 == pl_strcasecmp(&msg->met, "GET") &&
+	         0 == pl_strcmp(&msg->path, "/api/nat")) {
+		handle_nat_info(conn);
 	}
 	/* Static files */
 	else if (0 == pl_strcasecmp(&msg->met, "GET")) {

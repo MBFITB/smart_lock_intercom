@@ -71,6 +71,97 @@
                 android:textSize="14sp" />
         </LinearLayout>
 
+        <!-- Auth + Relay settings (collapsible) -->
+        <LinearLayout
+            android:id="@+id/advancedPanel"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:visibility="gone">
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:layout_marginTop="8dp">
+
+                <com.google.android.material.textfield.TextInputEditText
+                    android:id="@+id/usernameInput"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:hint="用户名"
+                    android:inputType="text"
+                    android:textColor="#FFFFFF"
+                    android:textColorHint="#888888"
+                    android:textSize="14sp"
+                    android:padding="10dp"
+                    android:background="#333333"
+                    android:singleLine="true" />
+
+                <com.google.android.material.textfield.TextInputEditText
+                    android:id="@+id/passwordInput"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:layout_marginStart="8dp"
+                    android:hint="密码"
+                    android:inputType="textPassword"
+                    android:textColor="#FFFFFF"
+                    android:textColorHint="#888888"
+                    android:textSize="14sp"
+                    android:padding="10dp"
+                    android:background="#333333"
+                    android:singleLine="true" />
+            </LinearLayout>
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:layout_marginTop="8dp">
+
+                <com.google.android.material.textfield.TextInputEditText
+                    android:id="@+id/relayInput"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="2"
+                    android:hint="中继服务器 (host:port)"
+                    android:inputType="text"
+                    android:textColor="#FFFFFF"
+                    android:textColorHint="#888888"
+                    android:textSize="14sp"
+                    android:padding="10dp"
+                    android:background="#333333"
+                    android:singleLine="true" />
+
+                <com.google.android.material.textfield.TextInputEditText
+                    android:id="@+id/deviceIdInput"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:layout_marginStart="8dp"
+                    android:hint="设备ID"
+                    android:inputType="text"
+                    android:textColor="#FFFFFF"
+                    android:textColorHint="#888888"
+                    android:textSize="14sp"
+                    android:padding="10dp"
+                    android:background="#333333"
+                    android:singleLine="true" />
+            </LinearLayout>
+        </LinearLayout>
+
+        <TextView
+            android:id="@+id/advancedToggle"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp"
+            android:text="▶ 高级设置"
+            android:textColor="#888888"
+            android:textSize="12sp"
+            android:paddingVertical="4dp" />
+
         <!-- Talk button -->
         <Button
             android:id="@+id/talkBtn"

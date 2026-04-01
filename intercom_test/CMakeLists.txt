@@ -15,6 +15,9 @@ add_executable(intercom_test
     src/audio_out_win.c
     src/audio_in_win.c
     src/rtsp_server.c
+    src/rtsp_auth.c
+    src/stun_client.c
+    src/relay_client.c
 )
 
 target_include_directories(intercom_test PRIVATE
@@ -55,4 +58,12 @@ if(WIN32)
     )
 else()
     target_link_libraries(intercom_test PRIVATE m stdc++)
+endif()
+
+# Relay Server (standalone, no libre dependency)
+add_executable(relay_server
+    relay_server/relay_server.c
+)
+if(WIN32)
+    target_link_libraries(relay_server PRIVATE ws2_32)
 endif()

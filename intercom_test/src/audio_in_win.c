@@ -40,6 +40,7 @@ static struct {
 	LONG         wr;      /* write index (waveIn callback thread) */
 	LONG         rd;      /* read index (main/timer thread) */
 	uint32_t     drop_count;  /* dropped sample counter */
+	DWORD        last_drop_log; /* tick of last drop warning */
 
 	CRITICAL_SECTION cs;
 } g_ain;
@@ -59,10 +60,14 @@ static void enqueue_to_ring(const int16_t *src, int count)
 		if (next == g_ain.rd) {
 			/* Ring full — drop oldest sample */
 			g_ain.rd = (g_ain.rd + 1) % RING_SIZE;
-			if (++g_ain.drop_count % 1000 == 1)
+			g_ain.drop_count++;
+			DWORD now = GetTickCount();
+			if (now - g_ain.last_drop_log > 10000) {
+				g_ain.last_drop_log = now;
 				re_printf("[AUDIO-IN] Ring buffer full, "
 					  "dropped %u samples\n",
 					  g_ain.drop_count);
+			}
 		}
 
 		/* Apply software gain with clipping */

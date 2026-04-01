@@ -16,6 +16,9 @@
 #include <rem.h>
 #include "intercom.h"
 #include "rtsp_server.h"
+#include "rtsp_auth.h"
+#include "stun_client.h"
+#include "relay_client.h"
 
 
 static struct http_sock *httpsock;
@@ -63,8 +66,33 @@ int main(int argc, char *argv[])
 	char www_path[512];
 	int err;
 
-	(void)argc;
-	(void)argv;
+	/* Configurable via command-line args */
+	const char *auth_user = NULL;
+	const char *auth_pass = NULL;
+	const char *relay_host = NULL;
+	uint16_t relay_port = 9100;
+	const char *device_id = NULL;
+	const char *relay_token = "smartlock2026";
+	const char *stun_server = NULL;
+
+	/* Parse arguments: --user X --pass X --relay H --relay-port P
+	 *                  --device-id X --relay-token X --stun S */
+	for (int i = 1; i < argc; i++) {
+		if (strcmp(argv[i], "--user") == 0 && i + 1 < argc)
+			auth_user = argv[++i];
+		else if (strcmp(argv[i], "--pass") == 0 && i + 1 < argc)
+			auth_pass = argv[++i];
+		else if (strcmp(argv[i], "--relay") == 0 && i + 1 < argc)
+			relay_host = argv[++i];
+		else if (strcmp(argv[i], "--relay-port") == 0 && i + 1 < argc)
+			relay_port = (uint16_t)atoi(argv[++i]);
+		else if (strcmp(argv[i], "--device-id") == 0 && i + 1 < argc)
+			device_id = argv[++i];
+		else if (strcmp(argv[i], "--relay-token") == 0 && i + 1 < argc)
+			relay_token = argv[++i];
+		else if (strcmp(argv[i], "--stun") == 0 && i + 1 < argc)
+			stun_server = argv[++i];
+	}
 
 	/* Initialize libre */
 	err = libre_init();
@@ -111,8 +139,40 @@ int main(int argc, char *argv[])
 			re_printf("\n  http://0.0.0.0:9000/\n");
 			re_printf("  rtsp://0.0.0.0:8555/live\n");
 		}
-		re_printf("\nPress Ctrl+C to quit.\n\n");
 	}
+
+	/* Initialize RTSP Digest Authentication (optional) */
+	if (auth_user && auth_pass) {
+		rtsp_auth_init(auth_user, auth_pass);
+		re_printf("  RTSP auth: enabled (user=%s)\n", auth_user);
+	} else {
+		re_printf("  RTSP auth: disabled "
+			  "(use --user/--pass to enable)\n");
+	}
+
+	/* STUN discovery (optional — discover public address) */
+	if (stun_server) {
+		err = stun_discover(stun_server, 19302, 8555, NULL, NULL);
+		if (err)
+			re_fprintf(stderr, "STUN discovery failed: %m\n", err);
+		else
+			re_printf("  STUN: querying %s...\n", stun_server);
+	}
+
+	/* Relay client (optional — register with relay for NAT traversal) */
+	if (relay_host && device_id) {
+		err = relay_client_start(relay_host, relay_port,
+					device_id, relay_token,
+					rtsp_accept_relay_conn, NULL);
+		if (err)
+			re_fprintf(stderr, "Relay client failed: %m\n", err);
+		else
+			re_printf("  Relay: connecting to %s:%u "
+				  "(device=%s)\n",
+				  relay_host, relay_port, device_id);
+	}
+
+	re_printf("\nPress Ctrl+C to quit.\n\n");
 
 	/* Run event loop */
 	err = re_main(signal_handler);
@@ -123,6 +183,8 @@ out:
 		session_close(g_session);
 		mem_deref(g_session);
 	}
+	relay_client_stop();
+	stun_close();
 	rtsp_server_close();
 	http_sig_close();
 	mem_deref(httpsock);

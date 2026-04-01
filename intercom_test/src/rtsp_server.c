@@ -22,6 +22,8 @@
 #include "rtsp_server.h"
 #include "audio_out.h"
 #include "audio_in.h"
+#include "rtsp_auth.h"
+#include "relay_client.h"
 
 #define PT_PCMU       0
 #define PT_H264       107
@@ -292,6 +294,7 @@ struct rtsp_req {
 	int cseq;
 	char transport[256];
 	char session[32];
+	char authorization[512];
 };
 
 static void parse_rtsp_request(const char *buf, size_t len,
@@ -345,6 +348,14 @@ static void parse_rtsp_request(const char *buf, size_t len,
 				if (slen >= sizeof(req->session))
 					slen = sizeof(req->session) - 1;
 				memcpy(req->session, val, slen);
+			}
+			else if (strncasecmp(line, "Authorization:", 14) == 0) {
+				const char *val = line + 14;
+				while (*val == ' ') val++;
+				size_t alen = (size_t)(eol - val);
+				if (alen >= sizeof(req->authorization))
+					alen = sizeof(req->authorization) - 1;
+				memcpy(req->authorization, val, alen);
 			}
 
 			line = eol;
@@ -900,6 +911,20 @@ static bool dispatch_rtsp(struct rtsp_client *cli,
 
 	re_printf("[RTSP] %s %s CSeq=%d\n", req.method, req.uri, req.cseq);
 
+	/* Authentication check (skip for OPTIONS which must be public) */
+	if (rtsp_auth_enabled() &&
+	    strcmp(req.method, "OPTIONS") != 0) {
+		const char *auth = req.authorization[0]
+			? req.authorization : NULL;
+		if (rtsp_auth_check(req.method, req.uri, auth) != 0) {
+			char challenge[256];
+			rtsp_auth_challenge(challenge, sizeof(challenge));
+			rtsp_reply(cli, req.cseq, 401, "Unauthorized",
+				   challenge, NULL, 0);
+			return false;
+		}
+	}
+
 	if (strcmp(req.method, "OPTIONS") == 0)
 		handle_options(cli, &req);
 	else if (strcmp(req.method, "DESCRIBE") == 0)
@@ -1406,4 +1431,42 @@ void rtsp_server_close(void)
 	}
 
 	timeEndPeriod(1);
+}
+
+
+/*------------------------------------------------------------------------
+ * Accept a relay-bridged TCP connection (called by relay_client)
+ *----------------------------------------------------------------------*/
+void rtsp_accept_relay_conn(void *tc_arg, void *arg)
+{
+	struct tcp_conn *tc = tc_arg;
+	struct rtsp_client *cli;
+
+	(void)arg;
+
+	re_printf("[RTSP] Relay bridged connection accepted\n");
+
+	cli = mem_zalloc(sizeof(*cli), client_destructor);
+	if (!cli) {
+		mem_deref(tc);
+		return;
+	}
+
+	cli->tc = tc;
+	cli->backchannel_interleaved = 0xFF;
+	cli->backchannel_interleaved_rtcp = 0xFF;
+
+	/* Attach our handlers to the relay's tcp_conn */
+	tcp_set_handlers(tc,
+			 rtsp_estab_handler,
+			 rtsp_recv_handler,
+			 rtsp_close_handler, cli);
+
+	tcp_conn_set_nodelay(cli->tc, true);
+
+	tmr_init(&cli->tmr_timeout);
+	tmr_start(&cli->tmr_timeout, 60000,
+		  session_timeout_handler, cli);
+
+	list_append(&g_rtsp.clients, &cli->le, cli);
 }

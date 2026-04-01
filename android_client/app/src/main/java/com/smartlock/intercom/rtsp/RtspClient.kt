@@ -6,6 +6,7 @@ import java.io.InputStream
 import java.io.OutputStream
 import java.net.InetSocketAddress
 import java.net.Socket
+import java.security.MessageDigest
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.random.Random
@@ -19,7 +20,9 @@ import kotlin.random.Random
 class RtspClient(
     private val host: String,
     private val port: Int = 8555,
-    private val path: String = "/live"
+    private val path: String = "/live",
+    private val username: String? = null,
+    private val password: String? = null
 ) {
     companion object {
         private const val TAG = "RtspClient"
@@ -34,6 +37,8 @@ class RtspClient(
         private val CONTROL_RE = Regex("a=control:(\\S+)")
         private val RTPMAP_RE = Regex("a=rtpmap:\\d+\\s+\\S+/(\\d+)")
         private val SPROP_RE = Regex("sprop-parameter-sets=([^;\\s]+)")
+        private val WWW_AUTH_RE = Regex("WWW-Authenticate:\\s*Digest\\s+(.*)", RegexOption.IGNORE_CASE)
+        private val AUTH_FIELD_RE = Regex("(\\w+)=\"([^\"]*)\"")
     }
 
     interface Listener {
@@ -98,13 +103,17 @@ class RtspClient(
     private var backchSsrc: Int = Random.nextInt()
     private var backchFirstPacket: Boolean = true
 
+    // Digest authentication state
+    @Volatile private var authRealm: String? = null
+    @Volatile private var authNonce: String? = null
+
     fun connect() {
         if (state != State.DISCONNECTED) return
         state = State.CONNECTING
 
         Thread({
             try {
-                doConnect()
+                doConnect(null)
             } catch (e: Exception) {
                 Log.e(TAG, "Connect failed", e)
                 state = State.ERROR
@@ -114,35 +123,60 @@ class RtspClient(
         }, "RtspConnect").start()
     }
 
-    private fun doConnect() {
-        // 1. TCP connect
-        val sock = Socket()
-        try {
-            sock.connect(InetSocketAddress(host, port), CONNECT_TIMEOUT_MS)
-            sock.soTimeout = READ_TIMEOUT_MS
+    /**
+     * Connect via a pre-established Socket (e.g. from relay bridge).
+     * The socket must already be connected and ready for RTSP.
+     */
+    fun connectViaSocket(relaySocket: Socket) {
+        if (state != State.DISCONNECTED) return
+        state = State.CONNECTING
+
+        Thread({
+            try {
+                doConnect(relaySocket)
+            } catch (e: Exception) {
+                Log.e(TAG, "Relay connect failed", e)
+                state = State.ERROR
+                listener?.onError(e.message ?: "Unknown error")
+                disconnect()
+            }
+        }, "RtspRelayConnect").start()
+    }
+
+    private fun doConnect(existingSocket: Socket?) {
+        // 1. TCP connect (or use existing relay socket)
+        val sock: Socket
+        if (existingSocket != null) {
+            sock = existingSocket
             sock.tcpNoDelay = true
-            socket = sock
-            inputStream = sock.getInputStream()
-            outputStream = sock.getOutputStream()
-        } catch (e: Exception) {
-            try { sock.close() } catch (_: Exception) {}
-            throw e
+        } else {
+            sock = Socket()
+            try {
+                sock.connect(InetSocketAddress(host, port), CONNECT_TIMEOUT_MS)
+                sock.soTimeout = READ_TIMEOUT_MS
+                sock.tcpNoDelay = true
+            } catch (e: Exception) {
+                try { sock.close() } catch (_: Exception) {}
+                throw e
+            }
         }
+
+        socket = sock
+        inputStream = sock.getInputStream()
+        outputStream = sock.getOutputStream()
 
         // 2. OPTIONS
         sendRequest("OPTIONS", "$path", null)
-        readResponse()  // just check 200 OK
+        readResponse()  // just check 200 OK (OPTIONS doesn't require auth)
 
-        // 3. DESCRIBE
-        sendRequest("DESCRIBE", "$path", "Accept: application/sdp\r\n")
-        val descResp = readResponse()
+        // 3. DESCRIBE (may trigger 401 challenge)
+        val descResp = sendAuthRequest("DESCRIBE", "$path", "Accept: application/sdp\r\n")
         parseSdp(descResp.body)
 
         // 4. SETUP video (trackID=0, ch 0-1)
         val videoUrl = resolveTrackUrl(videoTrack?.controlUrl ?: "trackID=0")
-        sendRequest("SETUP", videoUrl,
+        val setupResp = sendAuthRequest("SETUP", videoUrl,
             "Transport: RTP/AVP/TCP;unicast;interleaved=0-1\r\n")
-        val setupResp = readResponse()
         if (sessionId == null) {
             sessionId = parseSessionId(setupResp.headers)
             if (sessionId.isNullOrEmpty()) {
@@ -152,27 +186,24 @@ class RtspClient(
 
         // 5. SETUP audio (trackID=1, ch 2-3)
         val audioUrl = resolveTrackUrl(audioTrack?.controlUrl ?: "trackID=1")
-        sendRequest("SETUP", audioUrl,
+        sendAuthRequest("SETUP", audioUrl,
             "Transport: RTP/AVP/TCP;unicast;interleaved=2-3\r\n" +
             "Session: $sessionId\r\n")
-        readResponse()
 
         // 6. SETUP backchannel (trackID=2, ch 4-5)
         if (backchannelTrack != null) {
             val backchUrl = resolveTrackUrl(backchannelTrack?.controlUrl ?: "trackID=2")
-            sendRequest("SETUP", backchUrl,
+            sendAuthRequest("SETUP", backchUrl,
                 "Transport: RTP/AVP/TCP;unicast;interleaved=4-5\r\n" +
                 "Session: $sessionId\r\n")
-            readResponse()
         }
 
         state = State.CONNECTED
 
         // 7. PLAY
-        sendRequest("PLAY", "$path",
+        sendAuthRequest("PLAY", "$path",
             "Session: $sessionId\r\n" +
             "Range: npt=0.000-\r\n")
-        readResponse()
 
         state = State.PLAYING
 
@@ -348,6 +379,8 @@ class RtspClient(
         backchTimestamp = Random.nextLong(0, 0xFFFFFFFFL)
         backchSsrc = Random.nextInt()
         backchFirstPacket = true
+        authRealm = null
+        authNonce = null
         state = State.DISCONNECTED
     }
 
@@ -365,6 +398,11 @@ class RtspClient(
         sb.append("$method $fullUri RTSP/1.0\r\n")
         sb.append("CSeq: $seq\r\n")
         sb.append("User-Agent: SmartLockIntercom/1.0\r\n")
+
+        // Add Digest Authorization if we have auth credentials + challenge
+        val authHeader = buildAuthHeader(method, fullUri)
+        if (authHeader != null) sb.append(authHeader)
+
         if (extraHeaders != null) sb.append(extraHeaders)
         sb.append("\r\n")
 
@@ -374,6 +412,33 @@ class RtspClient(
             outputStream?.write(data)
             outputStream?.flush()
         }
+    }
+
+    /**
+     * Send a request and handle 401 Digest challenge transparently.
+     * Retries once with credentials if server returns 401.
+     */
+    private fun sendAuthRequest(method: String, uri: String, extraHeaders: String?): RtspResponse {
+        sendRequest(method, uri, extraHeaders)
+        val resp = readResponse()
+
+        if (resp.statusCode == 401 && username != null && password != null
+            && authRealm != null && authNonce != null) {
+            // Retry with digest credentials
+            Log.d(TAG, "Retrying $method with digest auth")
+            sendRequest(method, uri, extraHeaders)
+            val retryResp = readResponse()
+            if (retryResp.statusCode == 401) {
+                throw IOException("Authentication failed for user $username")
+            }
+            return retryResp
+        }
+
+        if (resp.statusCode == 401) {
+            throw IOException("Server requires authentication (use --user/--pass)")
+        }
+
+        return resp
     }
 
     private data class RtspResponse(
@@ -426,7 +491,22 @@ class RtspClient(
             contentBase = cbMatch.groupValues[1].trimEnd('/')
         }
 
-        if (statusCode != 200) {
+        // Handle 401 Unauthorized — parse WWW-Authenticate for Digest
+        if (statusCode == 401) {
+            val authMatch = WWW_AUTH_RE.find(header)
+            if (authMatch != null) {
+                val params = authMatch.groupValues[1]
+                AUTH_FIELD_RE.findAll(params).forEach { m ->
+                    when (m.groupValues[1].lowercase()) {
+                        "realm" -> authRealm = m.groupValues[2]
+                        "nonce" -> authNonce = m.groupValues[2]
+                    }
+                }
+                Log.d(TAG, "Got 401 challenge: realm=$authRealm")
+            }
+        }
+
+        if (statusCode != 200 && statusCode != 401) {
             throw IOException("RTSP error $statusCode: $statusLine")
         }
 
@@ -553,5 +633,31 @@ class RtspClient(
             }
             prev = b
         }
+    }
+
+    // ---- Digest Authentication ----
+
+    private fun buildAuthHeader(method: String, uri: String): String? {
+        val user = username ?: return null
+        val pass = password ?: return null
+        val realm = authRealm ?: return null
+        val nonce = authNonce ?: return null
+
+        // HA1 = MD5(username:realm:password)
+        val ha1 = md5Hex("$user:$realm:$pass")
+        // HA2 = MD5(method:uri)
+        val ha2 = md5Hex("$method:$uri")
+        // response = MD5(HA1:nonce:HA2)
+        val response = md5Hex("$ha1:$nonce:$ha2")
+
+        return "Authorization: Digest username=\"$user\", " +
+                "realm=\"$realm\", nonce=\"$nonce\", " +
+                "uri=\"$uri\", response=\"$response\"\r\n"
+    }
+
+    private fun md5Hex(input: String): String {
+        val md = MessageDigest.getInstance("MD5")
+        val digest = md.digest(input.toByteArray(Charsets.US_ASCII))
+        return digest.joinToString("") { "%02x".format(it) }
     }
 }

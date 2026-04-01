@@ -17,6 +17,7 @@ import com.smartlock.intercom.media.AudioCapture
 import com.smartlock.intercom.media.AudioPlayer
 import com.smartlock.intercom.media.VideoDecoder
 import com.smartlock.intercom.rtsp.RtspClient
+import com.smartlock.intercom.rtsp.RelayConnection
 
 class MainActivity : AppCompatActivity(), RtspClient.Listener {
 
@@ -73,6 +74,18 @@ class MainActivity : AppCompatActivity(), RtspClient.Listener {
 
         binding.connectBtn.setOnClickListener { onConnectClick() }
         setupTalkButton()
+
+        // Advanced settings toggle
+        binding.advancedToggle.setOnClickListener {
+            val panel = binding.advancedPanel
+            if (panel.visibility == View.GONE) {
+                panel.visibility = View.VISIBLE
+                binding.advancedToggle.text = "▼ 高级设置"
+            } else {
+                panel.visibility = View.GONE
+                binding.advancedToggle.text = "▶ 高级设置"
+            }
+        }
 
         // Request audio permission early
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
@@ -152,11 +165,19 @@ class MainActivity : AppCompatActivity(), RtspClient.Listener {
             return
         }
 
+        // Read auth credentials (optional)
+        val username = binding.usernameInput.text?.toString()?.trim()?.ifEmpty { null }
+        val password = binding.passwordInput.text?.toString()?.trim()?.ifEmpty { null }
+
+        // Read relay settings (optional)
+        val relayAddr = binding.relayInput.text?.toString()?.trim()?.ifEmpty { null }
+        val deviceId = binding.deviceIdInput.text?.toString()?.trim()?.ifEmpty { null }
+
         // Start media pipeline
         videoDecoder = VideoDecoder()
         audioPlayer = AudioPlayer()
 
-        val client = RtspClient(host, port)
+        val client = RtspClient(host, port, username = username, password = password)
         client.listener = this
         rtspClient = client
         audioCapture = AudioCapture(client)
@@ -164,7 +185,32 @@ class MainActivity : AppCompatActivity(), RtspClient.Listener {
         // Start doorbell monitoring service
         DoorbellService.start(this, host)
 
-        client.connect()
+        // Connect via relay or directly
+        if (relayAddr != null && deviceId != null) {
+            val relayParts = relayAddr.split(":")
+            val relayHost = relayParts[0]
+            val relayPort = if (relayParts.size > 1) relayParts[1].toIntOrNull() ?: 9100 else 9100
+
+            if (relayHost.isEmpty() || !relayHost.matches(Regex("^[a-zA-Z0-9._-]+$"))) {
+                binding.statusText.text = "中继地址格式无效"
+                return
+            }
+
+            // Connect via relay in background
+            Thread({
+                try {
+                    val relay = RelayConnection(relayHost, relayPort, deviceId)
+                    val relaySocket = relay.connect()
+                    client.connectViaSocket(relaySocket)
+                } catch (e: Exception) {
+                    Log.e(TAG, "Relay connection failed", e)
+                    runOnUiThread { binding.statusText.text = "中继连接失败: ${e.message}" }
+                    client.listener?.onError("Relay: ${e.message}")
+                }
+            }, "RelayConnect").start()
+        } else {
+            client.connect()
+        }
     }
 
     @SuppressLint("ClickableViewAccessibility")
