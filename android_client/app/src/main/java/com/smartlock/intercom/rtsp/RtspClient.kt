@@ -7,6 +7,8 @@ import java.io.OutputStream
 import java.net.InetSocketAddress
 import java.net.Socket
 import java.security.MessageDigest
+import java.util.Timer
+import java.util.TimerTask
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.random.Random
@@ -29,6 +31,7 @@ class RtspClient(
         private const val CONNECT_TIMEOUT_MS = 5000
         private const val READ_TIMEOUT_MS = 10000
         private const val MAX_FRAME_SIZE = 100000  // 100KB max RTP frame
+        private const val KEEPALIVE_INTERVAL_MS = 45000L  // 45s keepalive
         private const val PT_H264 = 107
         private const val PT_PCMU = 0
         private val CONTENT_LENGTH_RE = Regex("Content-Length:\\s*(\\d+)", RegexOption.IGNORE_CASE)
@@ -75,6 +78,7 @@ class RtspClient(
     private var contentBase: String? = null
     private val running = AtomicBoolean(false)
     private var readThread: Thread? = null
+    private var keepaliveTimer: Timer? = null
 
     var listener: Listener? = null
     @Volatile
@@ -207,7 +211,10 @@ class RtspClient(
 
         state = State.PLAYING
 
-        // 8. Start reading interleaved frames
+        // 8. Start keepalive timer (prevent NAT mapping timeout)
+        startKeepalive()
+
+        // 9. Start reading interleaved frames
         running.set(true)
         readThread = Thread({
             readLoop()
@@ -353,8 +360,32 @@ class RtspClient(
         }
     }
 
+    private fun startKeepalive() {
+        stopKeepalive()
+        keepaliveTimer = Timer("RtspKeepalive", true).apply {
+            schedule(object : TimerTask() {
+                override fun run() {
+                    if (state != State.PLAYING) return
+                    try {
+                        Log.d(TAG, "Sending keepalive GET_PARAMETER")
+                        sendRequest("GET_PARAMETER", "$path",
+                            "Session: $sessionId\r\n")
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Keepalive send failed: ${e.message}")
+                    }
+                }
+            }, KEEPALIVE_INTERVAL_MS, KEEPALIVE_INTERVAL_MS)
+        }
+    }
+
+    private fun stopKeepalive() {
+        keepaliveTimer?.cancel()
+        keepaliveTimer = null
+    }
+
     fun disconnect() {
         running.set(false)
+        stopKeepalive()
 
         try {
             if (sessionId != null && socket?.isClosed == false) {

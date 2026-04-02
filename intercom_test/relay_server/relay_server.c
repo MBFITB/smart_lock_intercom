@@ -44,7 +44,7 @@ typedef int socklen_t;
 #include <errno.h>
 #endif
 
-#define RELAY_PORT       9100
+#define RELAY_PORT       443
 #define MAX_DEVICES      64
 #define MAX_LINE         256
 #define BRIDGE_BUF_SIZE  16384
@@ -397,6 +397,10 @@ int main(int argc, char *argv[])
 
 	if (bind(listen_sock, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
 		perror("bind");
+#ifndef _WIN32
+		if (port < 1024)
+			fprintf(stderr, "[RELAY] Hint: ports < 1024 require root or CAP_NET_BIND_SERVICE\n");
+#endif
 		close(listen_sock);
 		return 1;
 	}

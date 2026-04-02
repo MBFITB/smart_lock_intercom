@@ -126,7 +126,7 @@
                     android:layout_width="0dp"
                     android:layout_height="wrap_content"
                     android:layout_weight="2"
-                    android:hint="中继服务器 (host:port)"
+                    android:hint="中继服务器 (host:443)"
                     android:inputType="text"
                     android:textColor="#FFFFFF"
                     android:textColorHint="#888888"

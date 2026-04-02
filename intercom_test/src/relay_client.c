@@ -271,7 +271,7 @@ int relay_client_start(const char *relay_host, uint16_t relay_port,
 
 	str_ncpy(g_relay.relay_host, relay_host,
 		 sizeof(g_relay.relay_host));
-	g_relay.relay_port = relay_port ? relay_port : 9100;
+	g_relay.relay_port = relay_port ? relay_port : 443;
 	str_ncpy(g_relay.device_id, device_id,
 		 sizeof(g_relay.device_id));
 	str_ncpy(g_relay.auth_token, auth_token,

@@ -16,7 +16,7 @@ import java.net.Socket
  */
 class RelayConnection(
     private val relayHost: String,
-    private val relayPort: Int = 9100,
+    private val relayPort: Int = 443,
     private val deviceId: String
 ) {
     companion object {

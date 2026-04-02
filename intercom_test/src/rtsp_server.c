@@ -911,9 +911,10 @@ static bool dispatch_rtsp(struct rtsp_client *cli,
 
 	re_printf("[RTSP] %s %s CSeq=%d\n", req.method, req.uri, req.cseq);
 
-	/* Authentication check (skip for OPTIONS which must be public) */
+	/* Authentication check (skip for OPTIONS and GET_PARAMETER keepalive) */
 	if (rtsp_auth_enabled() &&
-	    strcmp(req.method, "OPTIONS") != 0) {
+	    strcmp(req.method, "OPTIONS") != 0 &&
+	    strcmp(req.method, "GET_PARAMETER") != 0) {
 		const char *auth = req.authorization[0]
 			? req.authorization : NULL;
 		if (rtsp_auth_check(req.method, req.uri, auth) != 0) {

@@ -70,7 +70,7 @@ int main(int argc, char *argv[])
 	const char *auth_user = NULL;
 	const char *auth_pass = NULL;
 	const char *relay_host = NULL;
-	uint16_t relay_port = 9100;
+	uint16_t relay_port = 443;
 	const char *device_id = NULL;
 	const char *relay_token = "smartlock2026";
 	const char *stun_server = NULL;

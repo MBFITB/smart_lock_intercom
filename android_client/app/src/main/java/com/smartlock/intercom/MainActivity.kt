@@ -189,7 +189,7 @@ class MainActivity : AppCompatActivity(), RtspClient.Listener {
         if (relayAddr != null && deviceId != null) {
             val relayParts = relayAddr.split(":")
             val relayHost = relayParts[0]
-            val relayPort = if (relayParts.size > 1) relayParts[1].toIntOrNull() ?: 9100 else 9100
+            val relayPort = if (relayParts.size > 1) relayParts[1].toIntOrNull() ?: 443 else 443
 
             if (relayHost.isEmpty() || !relayHost.matches(Regex("^[a-zA-Z0-9._-]+$"))) {
                 binding.statusText.text = "中继地址格式无效"

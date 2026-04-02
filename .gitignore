@@ -31,3 +31,6 @@ Thumbs.db
 .DS_Store
 *.swp
 *~
+
+*.log
+intercom_test/test_*.ps1
