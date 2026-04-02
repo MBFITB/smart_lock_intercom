@@ -17,7 +17,7 @@ class AudioPlayer {
         private const val SAMPLE_RATE = 8000
     }
 
-    private var audioTrack: AudioTrack? = null
+    @Volatile private var audioTrack: AudioTrack? = null
     private val decodeBuffer = ShortArray(960)  // Max 120ms at 8kHz
 
     fun start() {

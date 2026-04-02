@@ -24,7 +24,7 @@ class VideoDecoder {
 
     private var codec: MediaCodec? = null
     private var surface: Surface? = null
-    private var running = false
+    @Volatile private var running = false
     private var feedThread: Thread? = null
     private var framePtsUs = 0L
 
@@ -36,10 +36,7 @@ class VideoDecoder {
     private var fuOffset = 0
 
     fun start(surface: Surface, sps: ByteArray?, pps: ByteArray?) {
-        if (!surface.isValid) {
-            Log.w(TAG, "Surface not valid, cannot start decoder")
-            return
-        }
+        if (running) return  // already started
         this.surface = surface
 
         val format = MediaFormat.createVideoFormat(MIME_H264, 320, 240)
@@ -62,6 +59,7 @@ class VideoDecoder {
         }
         codec = mc
         running = true
+        framePtsUs = 0L
 
         feedThread = Thread({
             decodingLoop(mc)
@@ -75,8 +73,11 @@ class VideoDecoder {
         feedThread?.interrupt()
         feedThread?.join(2000)
         feedThread = null
+        fuBuffer = null
+        fuOffset = 0
 
         try {
+            codec?.flush()
             codec?.stop()
             codec?.release()
         } catch (_: Exception) {}

@@ -32,6 +32,10 @@ class RtspClient(
         private const val READ_TIMEOUT_MS = 10000
         private const val MAX_FRAME_SIZE = 100000  // 100KB max RTP frame
         private const val KEEPALIVE_INTERVAL_MS = 45000L  // 45s keepalive
+        private const val RECONNECT_INITIAL_MS = 2000L
+        private const val RECONNECT_MAX_MS = 30000L
+        private const val RECONNECT_MULTIPLIER = 2.0
+        private const val MAX_RECONNECT_ATTEMPTS = 20
         private const val PT_H264 = 107
         private const val PT_PCMU = 0
         private val CONTENT_LENGTH_RE = Regex("Content-Length:\\s*(\\d+)", RegexOption.IGNORE_CASE)
@@ -56,7 +60,7 @@ class RtspClient(
     }
 
     enum class State {
-        DISCONNECTED, CONNECTING, CONNECTED, PLAYING, ERROR
+        DISCONNECTED, CONNECTING, CONNECTED, PLAYING, RECONNECTING, ERROR
     }
 
     // SDP parsed info
@@ -69,16 +73,19 @@ class RtspClient(
         val spropPps: ByteArray? = null
     )
 
-    private var socket: Socket? = null
-    private var inputStream: InputStream? = null
-    private var outputStream: OutputStream? = null
+    @Volatile private var socket: Socket? = null
+    @Volatile private var inputStream: InputStream? = null
+    @Volatile private var outputStream: OutputStream? = null
 
     private val cseq = AtomicInteger(0)
     private var sessionId: String? = null
     private var contentBase: String? = null
     private val running = AtomicBoolean(false)
-    private var readThread: Thread? = null
+    @Volatile private var readThread: Thread? = null
     private var keepaliveTimer: Timer? = null
+    private var reconnectThread: Thread? = null
+    @Volatile private var autoReconnect = false
+    @Volatile private var lastRelaySocket: (() -> Socket)? = null
 
     var listener: Listener? = null
     @Volatile
@@ -112,17 +119,23 @@ class RtspClient(
     @Volatile private var authNonce: String? = null
 
     fun connect() {
-        if (state != State.DISCONNECTED) return
+        if (state != State.DISCONNECTED && state != State.RECONNECTING) return
+        val wasReconnecting = state == State.RECONNECTING
         state = State.CONNECTING
+        autoReconnect = true
+        lastRelaySocket = null
 
         Thread({
             try {
                 doConnect(null)
             } catch (e: Exception) {
                 Log.e(TAG, "Connect failed", e)
-                state = State.ERROR
-                listener?.onError(e.message ?: "Unknown error")
-                disconnect()
+                if (wasReconnecting || !autoReconnect) {
+                    state = State.ERROR
+                    listener?.onError(e.message ?: "Unknown error")
+                } else {
+                    scheduleReconnect()
+                }
             }
         }, "RtspConnect").start()
     }
@@ -132,22 +145,40 @@ class RtspClient(
      * The socket must already be connected and ready for RTSP.
      */
     fun connectViaSocket(relaySocket: Socket) {
-        if (state != State.DISCONNECTED) return
+        if (state != State.DISCONNECTED && state != State.RECONNECTING) return
         state = State.CONNECTING
+        autoReconnect = true
 
         Thread({
             try {
                 doConnect(relaySocket)
             } catch (e: Exception) {
                 Log.e(TAG, "Relay connect failed", e)
-                state = State.ERROR
-                listener?.onError(e.message ?: "Unknown error")
-                disconnect()
+                scheduleReconnect()
             }
         }, "RtspRelayConnect").start()
     }
 
+    fun connectViaSocketFactory(factory: () -> Socket) {
+        if (state != State.DISCONNECTED && state != State.RECONNECTING) return
+        state = State.CONNECTING
+        autoReconnect = true
+        lastRelaySocket = factory
+
+        Thread({
+            try {
+                val sock = factory()
+                doConnect(sock)
+            } catch (e: Exception) {
+                Log.e(TAG, "Relay connect failed", e)
+                scheduleReconnect()
+            }
+        }, "RtspRelayConnect").start()
+    }
+
+    @Synchronized
     private fun doConnect(existingSocket: Socket?) {
+        if (state != State.CONNECTING && state != State.RECONNECTING) return
         // 1. TCP connect (or use existing relay socket)
         val sock: Socket
         if (existingSocket != null) {
@@ -225,16 +256,16 @@ class RtspClient(
     private fun readLoop() {
         val buf = ByteArray(65536)
         val input = inputStream ?: return
+        val sock = socket ?: return
 
         try {
             // Keep timeout to detect stale connections
-            socket?.soTimeout = 30000
+            sock.soTimeout = 30000
 
             while (running.get()) {
                 val first = input.read()
                 if (first < 0) {
-                    if (running.get()) listener?.onError("Server closed connection")
-                    break
+                    break  // EOF — handled by finally block
                 }
 
                 if (first == 0x24) {  // '$' interleaved frame
@@ -265,13 +296,13 @@ class RtspClient(
                 }
             }
         } catch (e: IOException) {
-            if (running.get()) {
-                Log.e(TAG, "Read loop error", e)
-                listener?.onError("Connection lost: ${e.message}")
-            }
+            Log.e(TAG, "Read loop error", e)
         } finally {
-            if (running.get()) {
-                running.set(false)
+            val wasRunning = running.getAndSet(false)
+            if (wasRunning && autoReconnect) {
+                scheduleReconnect()
+            } else if (wasRunning) {
+                listener?.onError("Connection lost")
                 state = State.ERROR
             }
         }
@@ -318,7 +349,9 @@ class RtspClient(
      * @param pcmuData G.711 µ-law encoded samples
      */
     fun sendBackchannelAudio(pcmuData: ByteArray, offset: Int, length: Int) {
-        if (state != State.PLAYING || backchannelTrack == null) return
+        synchronized(this) {
+            if (state != State.PLAYING || backchannelTrack == null) return
+        }
 
         val rtpLen = 12 + length
         val frame = ByteArray(4 + rtpLen)
@@ -384,19 +417,32 @@ class RtspClient(
     }
 
     fun disconnect() {
+        autoReconnect = false
+        reconnectThread?.interrupt()
+        reconnectThread = null
+        internalCleanup(sendTeardown = true)
+        state = State.DISCONNECTED
+    }
+
+    private fun internalCleanup(sendTeardown: Boolean = false) {
         running.set(false)
         stopKeepalive()
 
-        try {
-            if (sessionId != null && socket?.isClosed == false) {
-                sendRequest("TEARDOWN", "$path",
-                    "Session: $sessionId\r\n")
-            }
-        } catch (_: Exception) {}
+        if (sendTeardown) {
+            try {
+                if (sessionId != null && socket?.isClosed == false) {
+                    sendRequest("TEARDOWN", "$path",
+                        "Session: $sessionId\r\n")
+                }
+            } catch (_: Exception) {}
+        }
 
         try { socket?.close() } catch (_: Exception) {}
 
-        readThread?.join(2000)
+        readThread?.let { t ->
+            t.join(5000)
+            if (t.isAlive) Log.w(TAG, "readThread did not terminate in 5s")
+        }
         readThread = null
         socket = null
         inputStream = null
@@ -412,7 +458,61 @@ class RtspClient(
         backchFirstPacket = true
         authRealm = null
         authNonce = null
-        state = State.DISCONNECTED
+    }
+
+    private fun scheduleReconnect() {
+        if (!autoReconnect) return
+        internalCleanup(sendTeardown = false)
+        state = State.RECONNECTING
+
+        reconnectThread?.interrupt()
+        reconnectThread?.join(2000)
+
+        reconnectThread = Thread({
+            var delay = RECONNECT_INITIAL_MS
+            var attempt = 0
+
+            while (autoReconnect && attempt < MAX_RECONNECT_ATTEMPTS) {
+                attempt++
+                Log.i(TAG, "Reconnect attempt $attempt in ${delay}ms")
+
+                try {
+                    Thread.sleep(delay)
+                } catch (_: InterruptedException) {
+                    Log.d(TAG, "Reconnect interrupted")
+                    return@Thread
+                }
+
+                if (!autoReconnect || Thread.currentThread().isInterrupted) return@Thread
+
+                try {
+                    val factory = lastRelaySocket
+                    if (factory != null) {
+                        val sock = factory()
+                        doConnect(sock)
+                    } else {
+                        doConnect(null)
+                    }
+                    Log.i(TAG, "Reconnected successfully on attempt $attempt")
+                    return@Thread
+                } catch (e: Exception) {
+                    Log.w(TAG, "Reconnect attempt $attempt failed: ${e.message}")
+                    internalCleanup(sendTeardown = false)
+                    if (autoReconnect) state = State.RECONNECTING
+                }
+
+                delay = (delay * RECONNECT_MULTIPLIER).toLong()
+                    .coerceAtMost(RECONNECT_MAX_MS)
+            }
+
+            if (autoReconnect) {
+                Log.e(TAG, "Reconnect failed after $attempt attempts")
+                autoReconnect = false
+                state = State.ERROR
+                listener?.onError("Reconnect failed after $attempt attempts")
+            }
+        }, "RtspReconnect")
+        reconnectThread!!.start()
     }
 
     /** Get SPS from SDP (for MediaCodec configuration) */

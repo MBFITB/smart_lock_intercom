@@ -3,6 +3,10 @@ package com.smartlock.intercom
 import android.Manifest
 import android.annotation.SuppressLint
 import android.content.pm.PackageManager
+import android.net.ConnectivityManager
+import android.net.Network
+import android.net.NetworkCapabilities
+import android.net.NetworkRequest
 import android.os.Build
 import android.os.Bundle
 import android.util.Log
@@ -18,6 +22,7 @@ import com.smartlock.intercom.media.AudioPlayer
 import com.smartlock.intercom.media.VideoDecoder
 import com.smartlock.intercom.rtsp.RtspClient
 import com.smartlock.intercom.rtsp.RelayConnection
+import java.net.Socket
 
 class MainActivity : AppCompatActivity(), RtspClient.Listener {
 
@@ -42,6 +47,7 @@ class MainActivity : AppCompatActivity(), RtspClient.Listener {
     private var pendingAutoConnect: String? = null
     @Volatile
     private var disconnecting = false
+    private var networkCallback: ConnectivityManager.NetworkCallback? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -131,6 +137,7 @@ class MainActivity : AppCompatActivity(), RtspClient.Listener {
     override fun onDestroy() {
         super.onDestroy()
         isStreaming = false
+        unregisterNetworkCallback()
         DoorbellService.stop(this)
         audioCapture?.stop()
         audioCapture = null
@@ -185,6 +192,9 @@ class MainActivity : AppCompatActivity(), RtspClient.Listener {
         // Start doorbell monitoring service
         DoorbellService.start(this, host)
 
+        // Register network monitoring for auto-reconnect
+        registerNetworkCallback()
+
         // Connect via relay or directly
         if (relayAddr != null && deviceId != null) {
             val relayParts = relayAddr.split(":")
@@ -196,18 +206,11 @@ class MainActivity : AppCompatActivity(), RtspClient.Listener {
                 return
             }
 
-            // Connect via relay in background
-            Thread({
-                try {
-                    val relay = RelayConnection(relayHost, relayPort, deviceId)
-                    val relaySocket = relay.connect()
-                    client.connectViaSocket(relaySocket)
-                } catch (e: Exception) {
-                    Log.e(TAG, "Relay connection failed", e)
-                    runOnUiThread { binding.statusText.text = "中继连接失败: ${e.message}" }
-                    client.listener?.onError("Relay: ${e.message}")
-                }
-            }, "RelayConnect").start()
+            // Connect via relay with factory for reconnect support
+            val relayFactory: () -> Socket = {
+                RelayConnection(relayHost, relayPort, deviceId).connect()
+            }
+            client.connectViaSocketFactory(relayFactory)
         } else {
             client.connect()
         }
@@ -261,6 +264,7 @@ class MainActivity : AppCompatActivity(), RtspClient.Listener {
         if (disconnecting) return
         disconnecting = true
         isStreaming = false
+        unregisterNetworkCallback()
 
         val capture = audioCapture
         val client = rtspClient
@@ -315,13 +319,9 @@ class MainActivity : AppCompatActivity(), RtspClient.Listener {
                 }
                 RtspClient.State.CONNECTED -> {
                     binding.statusText.text = "已连接"
-                }
-                RtspClient.State.PLAYING -> {
-                    binding.statusText.text = "播放中"
-                    binding.talkBtn.isEnabled = true
-                    isStreaming = true
-
-                    // Start media decoders now that we know SPS/PPS
+                    // Start the existing decoders (created in onConnectClick, reused across reconnects).
+                    // NALs arriving between PLAY and this start() are buffered in nalQueue,
+                    // so the IDR keyframe won't be lost even if this runs after readLoop begins.
                     if (surfaceReady && !isDestroyed) {
                         val surface = binding.surfaceView.holder.surface
                         if (surface.isValid) {
@@ -334,6 +334,11 @@ class MainActivity : AppCompatActivity(), RtspClient.Listener {
                     }
                     audioPlayer?.start()
                 }
+                RtspClient.State.PLAYING -> {
+                    binding.statusText.text = "播放中"
+                    binding.talkBtn.isEnabled = true
+                    isStreaming = true
+                }
                 RtspClient.State.DISCONNECTED -> {
                     isStreaming = false
                     binding.statusText.text = "未连接"
@@ -341,12 +346,22 @@ class MainActivity : AppCompatActivity(), RtspClient.Listener {
                     binding.talkBtn.isEnabled = false
                     binding.addressInput.isEnabled = true
                 }
+                RtspClient.State.RECONNECTING -> {
+                    isStreaming = false
+                    binding.statusText.text = "正在重连..."
+                    binding.connectBtn.text = "断开"
+                    binding.talkBtn.isEnabled = false
+                    // Stop decoders during reconnect
+                    videoDecoder?.stop()
+                    audioPlayer?.stop()
+                }
                 RtspClient.State.ERROR -> {
                     isStreaming = false
                     binding.statusText.text = "连接错误"
                     binding.connectBtn.text = "连接"
                     binding.talkBtn.isEnabled = false
                     binding.addressInput.isEnabled = true
+                    unregisterNetworkCallback()
                 }
             }
         }
@@ -356,6 +371,11 @@ class MainActivity : AppCompatActivity(), RtspClient.Listener {
         Log.e(TAG, "Error: $message")
         runOnUiThread {
             binding.statusText.text = "错误: $message"
+            // Only fully disconnect if not reconnecting (reconnect is handled internally)
+            val client = rtspClient
+            if (client != null && client.state == RtspClient.State.RECONNECTING) {
+                return@runOnUiThread
+            }
             disconnectAll()
         }
     }
@@ -366,5 +386,51 @@ class MainActivity : AppCompatActivity(), RtspClient.Listener {
         val decoder = VideoDecoder()
         videoDecoder = decoder
         decoder.start(surface, rtspClient?.getSps(), rtspClient?.getPps())
+    }
+
+    private fun registerNetworkCallback() {
+        unregisterNetworkCallback()
+        val cm = getSystemService(ConnectivityManager::class.java) ?: return
+        val request = NetworkRequest.Builder()
+            .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+            .build()
+        val cb = object : ConnectivityManager.NetworkCallback() {
+            override fun onLost(network: Network) {
+                // Check if another network is available
+                val activeNet = cm.activeNetwork
+                if (activeNet != null) return  // WiFi→cellular transition, still online
+
+                Log.w(TAG, "All networks lost")
+                val client = rtspClient ?: return
+                if (client.state == RtspClient.State.PLAYING ||
+                    client.state == RtspClient.State.CONNECTED ||
+                    client.state == RtspClient.State.RECONNECTING) {
+                    runOnUiThread {
+                        binding.statusText.text = "网络断开，等待重连..."
+                    }
+                }
+            }
+            override fun onAvailable(network: Network) {
+                Log.i(TAG, "Network available")
+                // If we're already reconnecting, this is helpful info
+                val client = rtspClient ?: return
+                if (client.state == RtspClient.State.RECONNECTING) {
+                    runOnUiThread {
+                        binding.statusText.text = "网络恢复，正在重连..."
+                    }
+                }
+            }
+        }
+        networkCallback = cb
+        cm.registerNetworkCallback(request, cb)
+    }
+
+    private fun unregisterNetworkCallback() {
+        val cb = networkCallback ?: return
+        networkCallback = null
+        try {
+            val cm = getSystemService(ConnectivityManager::class.java)
+            cm?.unregisterNetworkCallback(cb)
+        } catch (_: Exception) {}
     }
 }
