@@ -1,0 +1,12 @@
+streams:
+  smartlock: rtsp://localhost:8555/live?nobc=1
+
+api:
+  listen: ":3100"
+  origin: "*"
+
+webrtc:
+  listen: ":8556"
+
+log:
+  level: info

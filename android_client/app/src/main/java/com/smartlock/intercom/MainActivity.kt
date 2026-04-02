@@ -22,6 +22,8 @@ import com.smartlock.intercom.media.AudioPlayer
 import com.smartlock.intercom.media.VideoDecoder
 import com.smartlock.intercom.rtsp.RtspClient
 import com.smartlock.intercom.rtsp.RelayConnection
+import com.smartlock.intercom.webrtc.WebRtcClient
+import org.webrtc.EglBase
 import java.net.Socket
 
 class MainActivity : AppCompatActivity(), RtspClient.Listener {
@@ -48,6 +50,11 @@ class MainActivity : AppCompatActivity(), RtspClient.Listener {
     @Volatile
     private var disconnecting = false
     private var networkCallback: ConnectivityManager.NetworkCallback? = null
+
+    // WebRTC mode
+    private var eglBase: EglBase? = null
+    private var webRtcClient: WebRtcClient? = null
+    private var isWebRtcMode = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -93,6 +100,14 @@ class MainActivity : AppCompatActivity(), RtspClient.Listener {
             }
         }
 
+        // WebRTC renderer init
+        eglBase = EglBase.create()
+        binding.webrtcView.init(eglBase!!.eglBaseContext, null)
+        binding.webrtcView.setScalingType(org.webrtc.RendererCommon.ScalingType.SCALE_ASPECT_FIT)
+
+        // Mode switching
+        setupModeListener()
+
         // Request audio permission early
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
             != PackageManager.PERMISSION_GRANTED) {
@@ -123,7 +138,7 @@ class MainActivity : AppCompatActivity(), RtspClient.Listener {
         val host = intent?.getStringExtra("auto_connect_host") ?: return
         intent.removeExtra("auto_connect_host")
 
-        if (rtspClient != null) return  // already connected
+        if (rtspClient != null || webRtcClient != null) return  // already connected
 
         if (surfaceReady) {
             binding.addressInput.setText(host)
@@ -143,20 +158,63 @@ class MainActivity : AppCompatActivity(), RtspClient.Listener {
         audioCapture = null
         rtspClient?.disconnect()
         rtspClient = null
+        webRtcClient?.release()
+        webRtcClient = null
         videoDecoder?.stop()
         videoDecoder = null
         audioPlayer?.stop()
         audioPlayer = null
+        binding.webrtcView.release()
+        eglBase?.release()
+        eglBase = null
     }
 
     private fun onConnectClick() {
         if (disconnecting) return  // wait for previous disconnect to finish
 
-        if (rtspClient != null) {
+        if (rtspClient != null || webRtcClient != null) {
             // Disconnect
             disconnectAll()
             return
         }
+
+        if (isWebRtcMode) {
+            onConnectWebRtc()
+        } else {
+            onConnectRtsp()
+        }
+    }
+
+    private fun onConnectWebRtc() {
+        val go2rtcAddr = binding.go2rtcInput.text?.toString()?.trim()
+        if (go2rtcAddr.isNullOrEmpty()) {
+            binding.statusText.text = "请输入 go2rtc 地址"
+            return
+        }
+
+        // Validate address
+        val addrHost = go2rtcAddr.split(":")[0]
+        if (addrHost.isEmpty() || !addrHost.matches(Regex("^[a-zA-Z0-9._-]+$"))) {
+            binding.statusText.text = "go2rtc 地址格式无效"
+            return
+        }
+
+        val go2rtcUrl = if (go2rtcAddr.startsWith("http")) go2rtcAddr else "http://$go2rtcAddr"
+
+        val egl = eglBase ?: return
+        val client = WebRtcClient(egl, applicationContext)
+        client.init()
+        client.listener = webRtcListener
+        webRtcClient = client
+
+        binding.connectBtn.text = "断开"
+        binding.addressInput.isEnabled = false
+        binding.statusText.text = "连接中..."
+
+        client.connect(go2rtcUrl, "smartlock", binding.webrtcView)
+    }
+
+    private fun onConnectRtsp() {
 
         val address = binding.addressInput.text?.toString()?.trim() ?: return
         if (address.isEmpty()) return
@@ -233,6 +291,22 @@ class MainActivity : AppCompatActivity(), RtspClient.Listener {
         }
     }
 
+    private fun setupModeListener() {
+        binding.modeGroup.setOnCheckedChangeListener { _, checkedId ->
+            if (rtspClient != null || webRtcClient != null) {
+                // Revert selection without triggering listener recursion
+                binding.modeGroup.setOnCheckedChangeListener(null)
+                binding.modeGroup.check(if (isWebRtcMode) R.id.modeWebrtc else R.id.modeRtsp)
+                setupModeListener()
+                return@setOnCheckedChangeListener
+            }
+            isWebRtcMode = (checkedId == R.id.modeWebrtc)
+            binding.go2rtcInput.visibility = if (isWebRtcMode) View.VISIBLE else View.GONE
+            binding.surfaceView.visibility = if (isWebRtcMode) View.GONE else View.VISIBLE
+            binding.webrtcView.visibility = if (isWebRtcMode) View.VISIBLE else View.GONE
+        }
+    }
+
     private fun startTalk() {
         val capture = audioCapture ?: return
         if (capture.isCapturing) return
@@ -266,6 +340,11 @@ class MainActivity : AppCompatActivity(), RtspClient.Listener {
         isStreaming = false
         unregisterNetworkCallback()
 
+        // WebRTC cleanup
+        val wrtc = webRtcClient
+        webRtcClient = null
+        wrtc?.listener = null
+
         val capture = audioCapture
         val client = rtspClient
         val decoder = videoDecoder
@@ -284,6 +363,7 @@ class MainActivity : AppCompatActivity(), RtspClient.Listener {
         Thread({
             capture?.stop()
             client?.disconnect()
+            wrtc?.disconnect()
             decoder?.stop()
             player?.stop()
             disconnecting = false
@@ -432,5 +512,47 @@ class MainActivity : AppCompatActivity(), RtspClient.Listener {
             val cm = getSystemService(ConnectivityManager::class.java)
             cm?.unregisterNetworkCallback(cb)
         } catch (_: Exception) {}
+    }
+
+    // ---- WebRtcClient.Listener ----
+
+    private val webRtcListener = object : WebRtcClient.Listener {
+        override fun onStateChanged(state: WebRtcClient.State) {
+            Log.i(TAG, "WebRTC State: $state")
+            runOnUiThread {
+                when (state) {
+                    WebRtcClient.State.CONNECTING -> {
+                        binding.statusText.text = "WebRTC 连接中..."
+                    }
+                    WebRtcClient.State.CONNECTED -> {
+                        binding.statusText.text = "信令完成，等待媒体..."
+                    }
+                    WebRtcClient.State.PLAYING -> {
+                        binding.statusText.text = "WebRTC 播放中"
+                        isStreaming = true
+                    }
+                    WebRtcClient.State.DISCONNECTED -> {
+                        isStreaming = false
+                        binding.statusText.text = "未连接"
+                        binding.connectBtn.text = "连接"
+                        binding.addressInput.isEnabled = true
+                    }
+                    WebRtcClient.State.ERROR -> {
+                        isStreaming = false
+                        binding.statusText.text = "WebRTC 连接错误"
+                        binding.connectBtn.text = "连接"
+                        binding.addressInput.isEnabled = true
+                    }
+                }
+            }
+        }
+
+        override fun onError(message: String) {
+            Log.e(TAG, "WebRTC Error: $message")
+            runOnUiThread {
+                binding.statusText.text = "错误: $message"
+                disconnectAll()
+            }
+        }
     }
 }

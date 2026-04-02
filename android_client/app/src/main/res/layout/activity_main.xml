@@ -6,11 +6,22 @@
     android:layout_height="match_parent"
     android:background="#000000">
 
-    <!-- Video display -->
+    <!-- Video display — RTSP mode -->
     <SurfaceView
         android:id="@+id/surfaceView"
         android:layout_width="0dp"
         android:layout_height="0dp"
+        app:layout_constraintTop_toTopOf="parent"
+        app:layout_constraintBottom_toTopOf="@id/controlPanel"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintEnd_toEndOf="parent" />
+
+    <!-- Video display — WebRTC mode -->
+    <org.webrtc.SurfaceViewRenderer
+        android:id="@+id/webrtcView"
+        android:layout_width="0dp"
+        android:layout_height="0dp"
+        android:visibility="gone"
         app:layout_constraintTop_toTopOf="parent"
         app:layout_constraintBottom_toTopOf="@id/controlPanel"
         app:layout_constraintStart_toStartOf="parent"
@@ -38,6 +49,34 @@
         android:padding="16dp"
         android:background="#1A1A1A"
         app:layout_constraintBottom_toBottomOf="parent">
+
+        <!-- Connection mode selector -->
+        <RadioGroup
+            android:id="@+id/modeGroup"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:layout_marginBottom="8dp">
+
+            <RadioButton
+                android:id="@+id/modeRtsp"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="局域网直连"
+                android:textColor="#CCCCCC"
+                android:buttonTint="#FF6F00"
+                android:checked="true" />
+
+            <RadioButton
+                android:id="@+id/modeWebrtc"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="WebRTC 云端"
+                android:textColor="#CCCCCC"
+                android:buttonTint="#FF6F00" />
+        </RadioGroup>
 
         <!-- Server address input -->
         <LinearLayout
@@ -71,13 +110,29 @@
                 android:textSize="14sp" />
         </LinearLayout>
 
-        <!-- Auth + Relay settings (collapsible) -->
+        <!-- Auth + Relay + WebRTC settings (collapsible) -->
         <LinearLayout
             android:id="@+id/advancedPanel"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:orientation="vertical"
             android:visibility="gone">
+
+            <!-- go2rtc address (WebRTC mode) -->
+            <com.google.android.material.textfield.TextInputEditText
+                android:id="@+id/go2rtcInput"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:hint="go2rtc 地址 (host:3100)"
+                android:text="192.168.10.25:3100"
+                android:inputType="text"
+                android:textColor="#FFFFFF"
+                android:textColorHint="#888888"
+                android:textSize="14sp"
+                android:padding="10dp"
+                android:background="#333333"
+                android:singleLine="true"
+                android:visibility="gone" />
 
             <LinearLayout
                 android:layout_width="match_parent"
