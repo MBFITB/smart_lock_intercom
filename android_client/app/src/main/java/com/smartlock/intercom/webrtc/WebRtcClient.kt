@@ -13,7 +13,7 @@ import java.util.concurrent.TimeUnit
 /**
  * WebRTC client that connects to go2rtc for cloud-based video/audio streaming.
  * Sends SDP offer to go2rtc HTTP API, receives answer, establishes peer connection.
- * Receive-only (video + audio), no send tracks.
+ * Video: receive-only. Audio: send+receive (bidirectional for intercom).
  */
 class WebRtcClient(
     private val eglBase: EglBase,
@@ -43,6 +43,8 @@ class WebRtcClient(
     private var peerConnectionFactory: PeerConnectionFactory? = null
     private var peerConnection: PeerConnection? = null
     private var connectThread: Thread? = null
+    @Volatile private var localAudioSource: AudioSource? = null
+    @Volatile private var localAudioTrack: AudioTrack? = null
 
     private val httpClient = OkHttpClient.Builder()
         .connectTimeout(10, TimeUnit.SECONDS)
@@ -135,14 +137,31 @@ class WebRtcClient(
         }
         peerConnection = pc
 
-        // Add receive-only transceivers
-        pc.addTransceiver(
+        // Add receive-only video transceiver
+        val videoTransceiver = pc.addTransceiver(
             MediaStreamTrack.MediaType.MEDIA_TYPE_VIDEO
-        )?.direction = RtpTransceiver.RtpTransceiverDirection.RECV_ONLY
+        )
+        if (videoTransceiver == null) {
+            state = State.ERROR
+            listener?.onError("Failed to add video transceiver")
+            return
+        }
+        videoTransceiver.direction = RtpTransceiver.RtpTransceiverDirection.RECV_ONLY
 
-        pc.addTransceiver(
-            MediaStreamTrack.MediaType.MEDIA_TYPE_AUDIO
-        )?.direction = RtpTransceiver.RtpTransceiverDirection.RECV_ONLY
+        // Add bidirectional audio transceiver with local mic track
+        val audioSource = factory.createAudioSource(MediaConstraints())
+        val audioTrack = factory.createAudioTrack("mic0", audioSource)
+        audioTrack.setEnabled(false)  // Start muted; push-to-talk enables it
+        localAudioSource = audioSource
+        localAudioTrack = audioTrack
+
+        val audioTransceiver = pc.addTransceiver(audioTrack)
+        if (audioTransceiver == null) {
+            state = State.ERROR
+            listener?.onError("Failed to add audio transceiver")
+            return
+        }
+        audioTransceiver.direction = RtpTransceiver.RtpTransceiverDirection.SEND_RECV
 
         // Create offer and exchange SDP with go2rtc
         connectThread = Thread({
@@ -257,6 +276,19 @@ class WebRtcClient(
         Log.i(TAG, "WebRTC signaling complete, waiting for ICE connection")
     }
 
+    /** Enable microphone sending (push-to-talk). Thread-safe. */
+    fun setMicEnabled(enabled: Boolean) {
+        val track = localAudioTrack ?: return
+        try {
+            track.setEnabled(enabled)
+        } catch (e: Exception) {
+            Log.w(TAG, "setMicEnabled failed (track disposed?)", e)
+        }
+    }
+
+    val isMicEnabled: Boolean
+        get() = localAudioTrack?.enabled() == true
+
     fun disconnect() {
         listener = null
         connectThread?.interrupt()
@@ -265,16 +297,24 @@ class WebRtcClient(
         peerConnection?.close()
         peerConnection = null
 
+        localAudioTrack?.dispose()
+        localAudioTrack = null
+        localAudioSource?.dispose()
+        localAudioSource = null
+
         state = State.DISCONNECTED
     }
 
     fun release() {
-        disconnect()
+        // Interrupt signaling thread first, then wait for it to finish
+        connectThread?.interrupt()
         try {
             connectThread?.join(5000)
         } catch (_: InterruptedException) {
             Thread.currentThread().interrupt()
         }
+        connectThread = null
+        disconnect()
         peerConnectionFactory?.dispose()
         peerConnectionFactory = null
     }

@@ -28,7 +28,7 @@
 #define PT_PCMU       0
 #define PT_H264       107
 #define AUDIO_SRATE   8000
-#define AUDIO_PTIME   40
+#define AUDIO_PTIME   20
 #define AUDIO_SAMPLES (AUDIO_SRATE * AUDIO_PTIME / 1000)
 #define VIDEO_WIDTH   320
 #define VIDEO_HEIGHT  240
@@ -79,7 +79,7 @@ struct rtsp_client {
 	bool video_setup;
 	bool audio_setup;
 
-	/* Backchannel audio (client → device, recvonly) */
+	/* Backchannel audio (client → device, sendonly per ONVIF) */
 	bool backchannel_setup;
 	uint8_t backchannel_interleaved;      /* TCP interleaved channel (RTP) */
 	uint8_t backchannel_interleaved_rtcp; /* TCP interleaved channel (RTCP) */
@@ -510,61 +510,37 @@ static void handle_describe(struct rtsp_client *cli, struct rtsp_req *req)
 		}
 	}
 
-	/* Skip backchannel track if URI contains "nobc" —
-	 * needed for go2rtc and other simple RTSP consumers
-	 * that get confused by the recvonly backchannel track. */
-	bool include_backchannel = (strstr(req->uri, "nobc") == NULL);
-
-	if (include_backchannel) {
-		n = re_snprintf(sdp, sizeof(sdp),
-			"v=0\r\n"
-			"o=- 0 0 IN IP4 %s\r\n"
-			"s=Smart Lock Intercom\r\n"
-			"c=IN IP4 0.0.0.0\r\n"
-			"t=0 0\r\n"
-			"m=video 0 RTP/AVP %d\r\n"
-			"a=rtpmap:%d H264/90000\r\n"
-			"a=fmtp:%d profile-level-id=42e01f;"
-			"packetization-mode=1%s\r\n"
-			"a=sendonly\r\n"
-			"a=control:trackID=0\r\n"
-			"m=audio 0 RTP/AVP %d\r\n"
-			"a=rtpmap:%d PCMU/8000\r\n"
-			"a=ptime:%d\r\n"
-			"a=sendonly\r\n"
-			"a=control:trackID=1\r\n"
-			"m=audio 0 RTP/AVP %d\r\n"
-			"a=rtpmap:%d PCMU/8000\r\n"
-			"a=ptime:%d\r\n"
-			"a=recvonly\r\n"
-			"a=control:trackID=2\r\n",
-			g_rtsp.local_ip,
-			PT_H264, PT_H264, PT_H264, sprop,
-			PT_PCMU, PT_PCMU, AUDIO_PTIME,
-			PT_PCMU, PT_PCMU, AUDIO_PTIME);
-	} else {
-		/* No direction attributes — standard RTSP SDP style.
-		 * go2rtc treats 'sendonly' as backchannel direction
-		 * and skips those tracks during matching. */
-		n = re_snprintf(sdp, sizeof(sdp),
-			"v=0\r\n"
-			"o=- 0 0 IN IP4 %s\r\n"
-			"s=Smart Lock Intercom\r\n"
-			"c=IN IP4 0.0.0.0\r\n"
-			"t=0 0\r\n"
-			"m=video 0 RTP/AVP %d\r\n"
-			"a=rtpmap:%d H264/90000\r\n"
-			"a=fmtp:%d profile-level-id=42e01f;"
-			"packetization-mode=1%s\r\n"
-			"a=control:trackID=0\r\n"
-			"m=audio 0 RTP/AVP %d\r\n"
-			"a=rtpmap:%d PCMU/8000\r\n"
-			"a=ptime:%d\r\n"
-			"a=control:trackID=1\r\n",
-			g_rtsp.local_ip,
-			PT_H264, PT_H264, PT_H264, sprop,
-			PT_PCMU, PT_PCMU, AUDIO_PTIME);
-	}
+	/* SDP: omit direction attributes on video/audio tracks so that
+	 * go2rtc (and other standard RTSP consumers) treat them as
+	 * default sendrecv and correctly SETUP for receiving.
+	 * The backchannel track uses 'sendonly' per ONVIF convention:
+	 * from server's perspective, sendonly = "server sends received
+	 * client audio to its speaker", which go2rtc matches to route
+	 * WebRTC microphone audio into the backchannel. */
+	n = re_snprintf(sdp, sizeof(sdp),
+		"v=0\r\n"
+		"o=- 0 0 IN IP4 %s\r\n"
+		"s=Smart Lock Intercom\r\n"
+		"c=IN IP4 0.0.0.0\r\n"
+		"t=0 0\r\n"
+		"m=video 0 RTP/AVP %d\r\n"
+		"a=rtpmap:%d H264/90000\r\n"
+		"a=fmtp:%d profile-level-id=42e01f;"
+		"packetization-mode=1%s\r\n"
+		"a=control:trackID=0\r\n"
+		"m=audio 0 RTP/AVP %d\r\n"
+		"a=rtpmap:%d PCMU/8000\r\n"
+		"a=ptime:%d\r\n"
+		"a=control:trackID=1\r\n"
+		"m=audio 0 RTP/AVP %d\r\n"
+		"a=rtpmap:%d PCMU/8000\r\n"
+		"a=ptime:%d\r\n"
+		"a=sendonly\r\n"
+		"a=control:trackID=2\r\n",
+		g_rtsp.local_ip,
+		PT_H264, PT_H264, PT_H264, sprop,
+		PT_PCMU, PT_PCMU, AUDIO_PTIME,
+		PT_PCMU, PT_PCMU, AUDIO_PTIME);
 
 	{
 		char desc_hdrs[512];

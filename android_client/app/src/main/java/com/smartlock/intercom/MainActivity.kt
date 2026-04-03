@@ -308,15 +308,27 @@ class MainActivity : AppCompatActivity(), RtspClient.Listener {
     }
 
     private fun startTalk() {
-        val capture = audioCapture ?: return
-        if (capture.isCapturing) return
-
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
             != PackageManager.PERMISSION_GRANTED) {
             ActivityCompat.requestPermissions(this,
                 arrayOf(Manifest.permission.RECORD_AUDIO), REQ_AUDIO_PERM)
             return
         }
+
+        // WebRTC mode: unmute the local audio track
+        val wrtc = webRtcClient
+        if (wrtc != null) {
+            wrtc.setMicEnabled(true)
+            runOnUiThread {
+                binding.talkBtn.text = "正在通话..."
+                binding.talkBtn.isActivated = true
+            }
+            return
+        }
+
+        // RTSP mode: start AudioCapture
+        val capture = audioCapture ?: return
+        if (capture.isCapturing) return
 
         if (capture.start(this)) {
             runOnUiThread {
@@ -327,7 +339,12 @@ class MainActivity : AppCompatActivity(), RtspClient.Listener {
     }
 
     private fun stopTalk() {
+        // WebRTC mode: mute the local audio track
+        webRtcClient?.setMicEnabled(false)
+
+        // RTSP mode: stop AudioCapture
         audioCapture?.stop()
+
         runOnUiThread {
             binding.talkBtn.text = "按住说话"
             binding.talkBtn.isActivated = false
@@ -340,12 +357,15 @@ class MainActivity : AppCompatActivity(), RtspClient.Listener {
         isStreaming = false
         unregisterNetworkCallback()
 
-        // WebRTC cleanup
+        // WebRTC cleanup — mute mic immediately before background teardown
         val wrtc = webRtcClient
         webRtcClient = null
+        wrtc?.setMicEnabled(false)
         wrtc?.listener = null
 
+        // RTSP cleanup — stop mic capture immediately
         val capture = audioCapture
+        capture?.stop()
         val client = rtspClient
         val decoder = videoDecoder
         val player = audioPlayer
@@ -361,7 +381,6 @@ class MainActivity : AppCompatActivity(), RtspClient.Listener {
         // Keep DoorbellService running so doorbell can be received while disconnected
 
         Thread({
-            capture?.stop()
             client?.disconnect()
             wrtc?.disconnect()
             decoder?.stop()
@@ -529,18 +548,21 @@ class MainActivity : AppCompatActivity(), RtspClient.Listener {
                     }
                     WebRtcClient.State.PLAYING -> {
                         binding.statusText.text = "WebRTC 播放中"
+                        binding.talkBtn.isEnabled = true
                         isStreaming = true
                     }
                     WebRtcClient.State.DISCONNECTED -> {
                         isStreaming = false
                         binding.statusText.text = "未连接"
                         binding.connectBtn.text = "连接"
+                        binding.talkBtn.isEnabled = false
                         binding.addressInput.isEnabled = true
                     }
                     WebRtcClient.State.ERROR -> {
                         isStreaming = false
                         binding.statusText.text = "WebRTC 连接错误"
                         binding.connectBtn.text = "连接"
+                        binding.talkBtn.isEnabled = false
                         binding.addressInput.isEnabled = true
                     }
                 }

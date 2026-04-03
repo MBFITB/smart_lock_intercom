@@ -46,8 +46,8 @@ static struct {
 } g_ain;
 
 
-/* Software gain: amplify mic PCM by ~8x (18dB) */
-#define MIC_GAIN  8
+/* Software gain: amplify mic PCM by ~10x (20dB) */
+#define MIC_GAIN  10
 
 static void enqueue_to_ring(const int16_t *src, int count)
 {

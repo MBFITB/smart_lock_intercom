@@ -1,5 +1,5 @@
 streams:
-  smartlock: rtsp://localhost:8555/live?nobc=1
+  smartlock: rtsp://localhost:8555/live
 
 api:
   listen: ":3100"
@@ -10,3 +10,5 @@ webrtc:
 
 log:
   level: info
+  rtsp: trace
+  streams: trace
